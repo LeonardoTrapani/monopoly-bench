@@ -3,6 +3,7 @@
  * `@mb/api` and `@mb/engine` schemas, the spectator feed over a WebSocket.
  */
 import {
+  CatalogResponse,
   CreateRunResponse,
   ErrorResponse,
   GameSummary,
@@ -13,6 +14,7 @@ import {
   RunConfig,
   RunDetail,
   RunsResponse,
+  RunSummary,
   SpectatorMessage,
   WakeTranscript,
 } from "@mb/api";
@@ -21,7 +23,15 @@ import { Effect, Layer, Option, Queue, Schema, Stream } from "effect";
 import { HttpClient, HttpClientRequest } from "effect/http";
 import { Http } from "foldkit";
 
-import { Api, ApiError, FeedMessage, type ApiClient, type GamesQuery } from "./api.ts";
+import {
+  Api,
+  ApiError,
+  CancelAuth,
+  FeedMessage,
+  RunPayment,
+  type ApiClient,
+  type GamesQuery,
+} from "./api.ts";
 
 const HTTP_OK_MIN = 200;
 
@@ -152,12 +162,33 @@ const spectate = (base: string, gameId: string): Stream.Stream<FeedMessage, ApiE
     ).pipe(Effect.andThen(Effect.never)),
   );
 
+/**
+ * Path of a competitor profile. The id is raw (the route decodes `/models/bot%3Arandom`), so it is
+ * encoded exactly once here: `/` and `:` become `%2F` and `%3A`, which the Worker decodes.
+ */
+export const modelPath = (competitorId: string): string =>
+  `/api/models/${encodeURIComponent(competitorId)}`;
+
+/** Adds who pays for a new run: the creator's OpenRouter key, or the bench API key. */
+const withPayment = (payment: RunPayment) =>
+  RunPayment.match(payment, {
+    OwnKey: ({ openRouterKey }) => HttpClientRequest.setHeader("x-openrouter-key", openRouterKey),
+    BenchKey: ({ apiKey }) => HttpClientRequest.bearerToken(apiKey),
+  });
+
+/** Adds what authorizes a cancel: the run's cancel token, or the bench API key. */
+const withCancelAuth = (auth: CancelAuth) =>
+  CancelAuth.match(auth, {
+    RunToken: ({ token }) => HttpClientRequest.setHeader("x-run-token", token),
+    BenchKey: ({ apiKey }) => HttpClientRequest.bearerToken(apiKey),
+  });
+
+/** `POST /api/runs/:id/cancel` answers `{ run }` (extra fields are ignored). */
+const CancelRunResponse = Schema.Struct({ run: RunSummary });
+
 /** The HTTP implementation of `ApiClient` against `base` (empty string: same origin). */
 const httpClient = (base: string): ApiClient => {
   const get = (path: string) => sendText(HttpClientRequest.get(apiUrl(base, path)));
-
-  const withKey = (request: HttpClientRequest.HttpClientRequest, apiKey: string) =>
-    request.pipe(HttpClientRequest.bearerToken(apiKey));
 
   return {
     leaderboard: (players) =>
@@ -166,9 +197,8 @@ const httpClient = (base: string): ApiClient => {
       ),
     models: get("/api/models").pipe(Effect.flatMap(decodeJson(ModelsResponse, "model list"))),
     model: (competitorId) =>
-      get(`/api/models/${encodeURIComponent(competitorId)}`).pipe(
-        Effect.flatMap(decodeJson(ModelProfile, "model profile")),
-      ),
+      get(modelPath(competitorId)).pipe(Effect.flatMap(decodeJson(ModelProfile, "model profile"))),
+    catalog: get("/api/catalog").pipe(Effect.flatMap(decodeJson(CatalogResponse, "model catalog"))),
     runs: get("/api/runs").pipe(Effect.flatMap(decodeJson(RunsResponse, "run list"))),
     run: (runId) =>
       get(`/api/runs/${encodeURIComponent(runId)}`).pipe(
@@ -192,26 +222,20 @@ const httpClient = (base: string): ApiClient => {
       get(`/api/games/${encodeURIComponent(gameId)}/transcripts`).pipe(
         Effect.flatMap(decodeNdjson(WakeTranscript, "transcripts")),
       ),
-    createRun: (config, apiKey) =>
+    createRun: (config, payment) =>
       sendText(
-        withKey(
-          HttpClientRequest.post(apiUrl(base, "/api/runs")).pipe(
-            HttpClientRequest.bodyText(encodeRunConfig(config), "application/json"),
-          ),
-          apiKey,
+        HttpClientRequest.post(apiUrl(base, "/api/runs")).pipe(
+          HttpClientRequest.bodyText(encodeRunConfig(config), "application/json"),
+          withPayment(payment),
+        ),
+      ).pipe(Effect.flatMap(decodeJson(CreateRunResponse, "run"))),
+    cancelRun: (runId, auth) =>
+      sendText(
+        HttpClientRequest.post(apiUrl(base, `/api/runs/${encodeURIComponent(runId)}/cancel`)).pipe(
+          withCancelAuth(auth),
         ),
       ).pipe(
-        Effect.flatMap(decodeJson(CreateRunResponse, "run")),
-        Effect.map((response) => response.run),
-      ),
-    cancelRun: (runId, apiKey) =>
-      sendText(
-        withKey(
-          HttpClientRequest.post(apiUrl(base, `/api/runs/${encodeURIComponent(runId)}/cancel`)),
-          apiKey,
-        ),
-      ).pipe(
-        Effect.flatMap(decodeJson(CreateRunResponse, "run")),
+        Effect.flatMap(decodeJson(CancelRunResponse, "run")),
         Effect.map((response) => response.run),
       ),
     spectate: (gameId) => spectate(base, gameId),

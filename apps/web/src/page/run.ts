@@ -1,18 +1,21 @@
-/** `/runs/:id`: progress, spend vs budget, lineup and games of one run; cancel with the API key. */
+/**
+ * `/runs/:id`: progress, spend vs budget, who pays, lineup and games of one run. Cancel with the
+ * cancel token this browser got when it started an own-key run, or with the bench API key.
+ */
 import { RunDetail, RunSummary } from "@mb/api";
-import { Duration, Effect, Schema } from "effect";
+import { Duration, Effect, Option, Schema } from "effect";
 import { AsyncData, Command, Submodel, type Update } from "foldkit";
 import type { Html, HtmlBuilder } from "foldkit/html";
 import { defineMessageUnion } from "foldkit/message";
 import { defineTaggedUnion } from "foldkit/schema";
 import { modifyFields } from "foldkit/struct";
 
-import { withApi, type Api } from "../api/api.ts";
+import { CancelAuth, withApi, type Api } from "../api/api.ts";
 import { integer, timestamp, usd } from "../domain/format.ts";
 import { failWith, reload, succeedWith } from "../domain/remote.ts";
 import { newRunRouter, runsRouter } from "../route.ts";
 import { gameCardView } from "../view/gameCard.ts";
-import { budgetView, lineupView, progressView } from "../view/run.ts";
+import { budgetView, fundingBadge, fundingText, lineupView, progressView } from "../view/run.ts";
 import {
   BUTTON_SECONDARY,
   deedCard,
@@ -72,10 +75,10 @@ export const FetchRun = Command.define("FetchRun", {
 });
 
 export const CancelRun = Command.define("CancelRun", {
-  args: { runId: Schema.String, apiKey: Schema.String },
+  args: { runId: Schema.String, auth: CancelAuth },
   messages: [Message.SucceededCancelRun, Message.FailedCancelRun],
-  execute: ({ runId, apiKey }) =>
-    withApi((api) => api.cancelRun(runId, apiKey)).pipe(
+  execute: ({ runId, auth }) =>
+    withApi((api) => api.cancelRun(runId, auth)).pipe(
       Effect.map((run) => Message.SucceededCancelRun({ run })),
       Effect.catch((error) => Effect.succeed(Message.FailedCancelRun({ error }))),
     ),
@@ -97,24 +100,47 @@ export const init = (runId: string): Update.Return<Model, Message, Api> => ({
 
 const isActive = (run: RunSummary): boolean => run.status === "running" || run.status === "queued";
 
-export const update = (model: Model, message: Message, apiKey: string) =>
+/**
+ * What this browser can cancel the run with, kept by the root Model: the cancel token returned
+ * when this browser started an own-key run, and the bench API key.
+ */
+export interface Credentials {
+  readonly runToken: Option.Option<string>;
+  readonly apiKey: string;
+}
+
+/** The run's own cancel token first, then the bench API key. */
+export const cancelAuthOf = (credentials: Credentials): Option.Option<CancelAuth> =>
+  Option.match(credentials.runToken, {
+    onSome: (token) => Option.some(CancelAuth.RunToken({ token })),
+    onNone: () =>
+      credentials.apiKey === ""
+        ? Option.none()
+        : Option.some(CancelAuth.BenchKey({ apiKey: credentials.apiKey })),
+  });
+
+export const update = (model: Model, message: Message, credentials: Credentials) =>
   Message.match<Update.Return<Model, Message, Api>>(message, {
     ClickedRetry: () => ({
       model: modifyFields(model, { detail: reload }),
       commands: [FetchRun({ runId: model.runId })],
     }),
     ClickedCancel: () =>
-      apiKey === ""
-        ? {
-            model: modifyFields(model, {
-              cancel: () =>
-                Cancel.Failed({ error: "Add your API key on the Start a run page first." }),
-            }),
-          }
-        : {
-            model: modifyFields(model, { cancel: () => Cancel.Cancelling() }),
-            commands: [CancelRun({ runId: model.runId, apiKey })],
-          },
+      Option.match(cancelAuthOf(credentials), {
+        onNone: () => ({
+          model: modifyFields(model, {
+            cancel: () =>
+              Cancel.Failed({
+                error:
+                  "Only the browser that started this run, or the bench API key, can cancel it.",
+              }),
+          }),
+        }),
+        onSome: (auth) => ({
+          model: modifyFields(model, { cancel: () => Cancel.Cancelling() }),
+          commands: [CancelRun({ runId: model.runId, auth })],
+        }),
+      }),
     SucceededFetchRun: ({ detail }) => ({
       model: modifyFields(model, { detail: succeedWith(detail) }),
       commands: isActive(detail.run) ? [WaitBeforeRefresh()] : [],
@@ -137,7 +163,30 @@ export const update = (model: Model, message: Message, apiKey: string) =>
 
 // VIEW
 
-export type ViewInputs = Readonly<{ hasApiKey: boolean }>;
+export type ViewInputs = Readonly<{ credentials: Credentials }>;
+
+const cancelHint = (run: RunSummary, inputs: ViewInputs, h: HtmlBuilder<Message>): Html =>
+  Option.match(cancelAuthOf(inputs.credentials), {
+    onSome: (auth) =>
+      CancelAuth.match(auth, {
+        RunToken: () =>
+          h.p(
+            [h.Class("text-xs text-muted")],
+            ["You started this run: this browser can cancel it."],
+          ),
+        BenchKey: () => h.empty,
+      }),
+    onNone: () =>
+      run.funding === "ownKey"
+        ? h.p(
+            [h.Class("max-w-56 text-right text-xs text-muted")],
+            ["Only the browser that started this run can cancel it."],
+          )
+        : h.a(
+            [h.Href(newRunRouter()), h.Class("text-xs text-muted underline")],
+            ["Cancelling needs the bench API key"],
+          ),
+  });
 
 const cancelView = (
   model: Model,
@@ -147,26 +196,25 @@ const cancelView = (
 ): Html => {
   if (!isActive(run)) return h.empty;
 
+  const canCancel = Option.isSome(cancelAuthOf(inputs.credentials));
+  const isCancelling = Cancel.guards.Cancelling(model.cancel);
+
   return h.div(
     [h.Class("flex flex-col items-end gap-1")],
     [
-      h.button(
-        [
-          h.Type("button"),
-          h.Class(BUTTON_SECONDARY),
-          h.Disabled(Cancel.guards.Cancelling(model.cancel)),
-          h.OnClick(Message.ClickedCancel()),
-        ],
-        [Cancel.guards.Cancelling(model.cancel) ? "Cancelling…" : "Cancel run"],
-      ),
+      canCancel
+        ? h.button(
+            [
+              h.Type("button"),
+              h.Class(BUTTON_SECONDARY),
+              h.Disabled(isCancelling),
+              h.OnClick(Message.ClickedCancel()),
+            ],
+            [isCancelling ? "Cancelling…" : "Cancel run"],
+          )
+        : h.empty,
       Cancel.match(model.cancel, {
-        Idle: () =>
-          inputs.hasApiKey
-            ? h.empty
-            : h.a(
-                [h.Href(newRunRouter()), h.Class("text-xs text-muted underline")],
-                ["Needs your API key"],
-              ),
+        Idle: () => cancelHint(run, inputs, h),
         Cancelling: () => h.empty,
         Failed: ({ error }) =>
           h.p([h.Class("text-xs font-semibold text-red"), h.Role("alert")], [error]),
@@ -194,9 +242,10 @@ const detailView = (
             [],
             [
               h.div(
-                [h.Class("mb-1 flex items-center gap-2")],
+                [h.Class("mb-1 flex flex-wrap items-center gap-x-2 gap-y-1")],
                 [
                   runStatusBadge(h, run.status),
+                  fundingBadge(h, run.funding),
                   h.span([h.Class("text-xs text-muted")], [`created ${timestamp(run.createdAt)}`]),
                 ],
               ),
@@ -224,6 +273,7 @@ const detailView = (
               h.p([h.Class("deed-kicker text-money")], ["Spend vs budget"]),
               h.p([h.Class("num mt-1 mb-3 text-2xl font-bold text-ink")], [usd(run.spentUsd)]),
               budgetView(h, run),
+              h.p([h.Class("mt-2 text-xs text-ink-2")], [fundingText(run.funding)]),
             ],
           ),
           deedCard(h, { kicker: "Averages", title: "Per game" }, [

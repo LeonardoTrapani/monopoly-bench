@@ -1,8 +1,12 @@
-/** `/about`: methodology (rules source, declared variants, turn flow, wake rules, ratings, metrics). */
+/**
+ * `/about`: methodology (rules source, declared variants, turn flow, wake rules, players and their
+ * memory, ratings, metrics, cost estimates).
+ */
+import { estimateSeatCostUsd, seatCostModel, type ModelPricing } from "@mb/api";
 import { DEFAULT_RULES } from "@mb/engine";
 import type { Html, HtmlBuilder } from "foldkit/html";
 
-import { money } from "../domain/format.ts";
+import { integer, money, perMTok, usd } from "../domain/format.ts";
 import { GROUP_COLORS } from "../domain/palette.ts";
 import { WAKE_REASON_TEXT } from "../domain/wake.ts";
 
@@ -15,6 +19,7 @@ const SECTIONS = [
   ["agents", "Players"],
   ["ratings", "Runs & ratings"],
   ["metrics", "Metrics"],
+  ["costs", "Cost estimates"],
 ] as const;
 
 const card = <M>(
@@ -135,6 +140,57 @@ const defaultsTable = <M>(h: HtmlBuilder<M>): Html => {
       ),
     ],
   );
+};
+
+/** A worked example for the cost section (prices of a typical frontier model with caching). */
+const EXAMPLE_PRICING: ModelPricing = {
+  inputPerMTok: 3,
+  outputPerMTok: 15,
+  cacheReadPerMTok: 0.3,
+  cacheWritePerMTok: 3.75,
+};
+
+const costsCard = <M>(h: HtmlBuilder<M>): Html => {
+  const exampleSeat = estimateSeatCostUsd(EXAMPLE_PRICING);
+
+  return card(h, "costs", "What a run will roughly cost", "Cost estimates", [
+    h.p(
+      [],
+      [
+        "The start-a-run form shows a rough cost for each model and a live total for the run. Both come from OpenRouter's prices and one fixed picture of a seat in a full 4-player game, measured on bot games and real model wakes:",
+      ],
+    ),
+    bullet(h, [
+      `About ${integer(seatCostModel.wakesPerSeat)} wakes per seat over a whole game.`,
+      `Each wake re-reads about ${integer(seatCostModel.cachedTokensPerWake)} cached tokens (the whole-game conversation, compacted at the fixed budget), writes about ${integer(seatCostModel.freshTokensPerWake)} new tokens and produces about ${integer(seatCostModel.outputTokensPerWake)} output tokens with medium reasoning.`,
+      "Models without prompt caching pay the full input price for the re-read tokens; without a cache-write price, new tokens are priced as input.",
+    ]),
+    h.div(
+      [h.Class("num space-y-1 rounded-md border border-line bg-paper-2 p-3 text-xs text-ink")],
+      [
+        h.p(
+          [],
+          [
+            `seat ≈ ${integer(seatCostModel.wakesPerSeat)} × (${integer(seatCostModel.cachedTokensPerWake)} × cache read + ${integer(seatCostModel.freshTokensPerWake)} × cache write + ${integer(seatCostModel.outputTokensPerWake)} × output) / 1,000,000`,
+          ],
+        ),
+        h.p([], ["run ≈ Σ seats × games, where games = seeds × players"]),
+      ],
+    ),
+    h.p(
+      [],
+      [
+        `For example, at ${perMTok(EXAMPLE_PRICING.inputPerMTok)} in and ${perMTok(EXAMPLE_PRICING.outputPerMTok)} out per million tokens, with ${perMTok(EXAMPLE_PRICING.cacheReadPerMTok ?? 0)} cache reads and ${perMTok(EXAMPLE_PRICING.cacheWritePerMTok ?? 0)} cache writes, one seat costs about ${usd(exampleSeat)} per game. Every seat plays every game of a run, so one seed at a 4-seat table (4 games) with four such models costs about ${usd(exampleSeat * 16)}.`,
+      ],
+    ),
+    h.p(
+      [],
+      [
+        strong(h, "It is only an estimate. "),
+        "Bankruptcies end games early and the turn cap ends them late, other table sizes change the wakes per seat, reasoning effort changes the output, and prices move. The run's budget is the hard cap: once it is spent no new model calls are made and running games abort.",
+      ],
+    ),
+  ]);
 };
 
 export const aboutView = <M>(h: HtmlBuilder<M>): Html =>
@@ -335,9 +391,32 @@ export const aboutView = <M>(h: HtmlBuilder<M>): Html =>
                 h.p(
                   [],
                   [
-                    "Each LLM seat runs a tool-calling agent through OpenRouter. Players see who they play against (seat letter and model). A wake message lists what happened since the last wake, the player's view of the board, the question and its legal actions, open offers and threads, and the player's own notes, its only memory across decisions.",
+                    "Each LLM seat runs a tool-calling agent through OpenRouter. Players see who they play against (seat letter and model). A wake message lists what happened since the last wake, the player's view of the board, the question and its legal actions, open offers and threads, and the player's own notes.",
                   ],
                 ),
+                bullet(h, [
+                  h.span(
+                    [],
+                    [
+                      strong(h, "One conversation per game. "),
+                      "Each player keeps a single conversation from its first wake to the end of the game: every wake is a new message in it, so the model remembers its own plans, offers and reasoning.",
+                    ],
+                  ),
+                  h.span(
+                    [],
+                    [
+                      strong(h, "Automatic compaction. "),
+                      "When the conversation reaches a fixed token budget, the same for every model, older turns are summarized and the game goes on in the compacted conversation. No model gets a longer memory because it has a larger context window.",
+                    ],
+                  ),
+                  h.span(
+                    [],
+                    [
+                      strong(h, "Notes at every wake. "),
+                      `The note tool keeps up to ${DEFAULT_RULES.notesMaxChars} characters of the player's own notes, shown in every wake message, so they survive compaction.`,
+                    ],
+                  ),
+                ]),
                 h.p(
                   [h.Class("num text-xs text-ink")],
                   [
@@ -347,7 +426,7 @@ export const aboutView = <M>(h: HtmlBuilder<M>): Html =>
                 h.p(
                   [],
                   [
-                    `Illegal calls return the engine's reason and count as invalid actions. On a timeout (${DEFAULT_RULES.wakeTimeoutMs / 1000} s) or failure the engine applies a recorded default: end the session, decline, pass the bid, roll for doubles, keep the mortgage, or liquidate automatically. Scripted bots (random and heuristic) play as baselines.`,
+                    `Illegal calls return the engine's reason and count as invalid actions. On a timeout (${DEFAULT_RULES.wakeTimeoutMs / 1000} s) or failure the engine applies a recorded default: end the session, decline, pass the bid, roll for doubles, keep the mortgage, or liquidate automatically. Public runs seat language models only.`,
                   ],
                 ),
               ]),
@@ -402,6 +481,7 @@ export const aboutView = <M>(h: HtmlBuilder<M>): Html =>
                   ),
                 ),
               ]),
+              costsCard(h),
             ],
           ),
         ],

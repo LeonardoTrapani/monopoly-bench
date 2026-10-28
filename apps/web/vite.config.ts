@@ -21,5 +21,8 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     chunkSizeWarningLimit: 900,
+    // Provider logos (`src/view/provider.ts`) ship as hashed files loaded on demand, not as data
+    // URLs inside the main chunk.
+    assetsInlineLimit: (file) => (file.includes("@lobehub/icons-static-svg") ? false : undefined),
   },
 });

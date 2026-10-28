@@ -1,12 +1,18 @@
-/** Shared pieces of the run pages: seat lineup chips, progress and spend-vs-budget bars. */
-import { competitorId, competitorLabel, type RunSummary, type SeatSpec } from "@mb/api";
+/** Shared pieces of the run pages: seat lineup chips, who pays, progress and spend vs budget. */
+import {
+  competitorId,
+  competitorLabel,
+  type RunFunding,
+  type RunSummary,
+  type SeatSpec,
+} from "@mb/api";
 import { Match } from "effect";
 import type { Html, HtmlBuilder } from "foldkit/html";
 
 import { integer, usd } from "../domain/format.ts";
-import { providerColor } from "../domain/palette.ts";
 import { competitorHref } from "../route.ts";
-import { progressBar } from "./ui.ts";
+import { competitorIcon } from "./provider.ts";
+import { pill, progressBar } from "./ui.ts";
 
 const seatDetail = (seat: SeatSpec): string =>
   Match.valueTags(seat, {
@@ -28,15 +34,12 @@ export const lineupView = <M>(h: HtmlBuilder<M>, seats: ReadonlyArray<SeatSpec>)
             [
               h.Href(competitorHref(competitorId(seat))),
               h.Class(
-                "inline-flex items-center gap-2 rounded-md border border-line bg-paper px-2 py-1 text-xs hover:border-line-strong",
+                "inline-flex items-center gap-1.5 rounded-md border border-line bg-paper py-1 pr-2 pl-1 text-xs hover:border-line-strong",
               ),
               h.Title(seatDetail(seat)),
             ],
             [
-              h.span([
-                h.Class("h-2.5 w-2.5 rounded-full"),
-                h.Style({ background: providerColor(competitorId(seat)) }),
-              ]),
+              competitorIcon(h, competitorId(seat), "xs"),
               h.span([h.Class("font-semibold text-ink")], [competitorLabel(seat)]),
             ],
           ),
@@ -44,6 +47,18 @@ export const lineupView = <M>(h: HtmlBuilder<M>, seats: ReadonlyArray<SeatSpec>)
       ),
     ),
   );
+
+/** Who pays for a run's model calls, in a sentence. */
+export const fundingText = (funding: RunFunding): string =>
+  funding === "ownKey"
+    ? "Paid with the creator's own OpenRouter key."
+    : "Paid with server credit (bench API key).";
+
+/** A small pill: "Own key" or "Server credit". */
+export const fundingBadge = <M>(h: HtmlBuilder<M>, funding: RunFunding): Html =>
+  funding === "ownKey"
+    ? pill(h, "Paid with own key", "border border-line bg-paper text-ink-2")
+    : pill(h, "Server credit", "border border-line bg-paper text-ink-2");
 
 export const progressView = <M>(h: HtmlBuilder<M>, run: RunSummary): Html =>
   h.div(

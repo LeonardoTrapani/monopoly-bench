@@ -17,7 +17,8 @@ import { money, ordinal } from "../../../domain/format.ts";
 import { worthsOf } from "../../../domain/replay.ts";
 import { competitorHref } from "../../../route.ts";
 import { deedChip } from "../../../view/deed.ts";
-import { botBadge, seatToken } from "../../../view/ui.ts";
+import { competitorIcon } from "../../../view/provider.ts";
+import { seatToken } from "../../../view/ui.ts";
 
 export interface SeatActivityHint {
   readonly seat: Seat;
@@ -78,6 +79,7 @@ const playerCard = <M>(
               h.div(
                 [h.Class("flex items-center gap-1.5")],
                 [
+                  competitorIcon(h, player.competitorId, "xs"),
                   h.a(
                     [
                       h.Href(competitorHref(player.competitorId)),
@@ -86,7 +88,6 @@ const playerCard = <M>(
                     ],
                     [player.label],
                   ),
-                  player.competitorId.startsWith("bot:") ? botBadge(h) : h.empty,
                   h.span(
                     [
                       h.Class("num shrink-0 text-[11px] font-bold text-muted"),

@@ -14,7 +14,8 @@ import { failWith, reload, succeedWith } from "../domain/remote.ts";
 import { gamesRouter, homeRouter } from "../route.ts";
 import { lineChart } from "../view/charts.ts";
 import { gameCardView } from "../view/gameCard.ts";
-import { botBadge, deedCard, emptyView, pill, remote, sectionHeading, stat } from "../view/ui.ts";
+import { competitorIcon } from "../view/provider.ts";
+import { deedCard, emptyView, pill, remote, sectionHeading, stat } from "../view/ui.ts";
 
 // MODEL
 
@@ -113,10 +114,7 @@ const headerView = (profile: ModelProfile, h: HtmlBuilder<Message>): Html => {
           }),
         ],
         [
-          h.span([
-            h.Class("h-12 w-12 shrink-0 rounded-md border-[1.5px] border-line-strong"),
-            h.Style({ background: providerColor(profile.competitorId) }),
-          ]),
+          competitorIcon(h, profile.competitorId, "lg"),
           h.div(
             [h.Class("min-w-0 flex-1")],
             [
@@ -128,7 +126,6 @@ const headerView = (profile: ModelProfile, h: HtmlBuilder<Message>): Html => {
           h.div(
             [h.Class("flex gap-2")],
             [
-              profile.kind === "bot" ? botBadge(h) : pill(h, "LLM", "bg-ink text-paper"),
               reasoning === null
                 ? h.empty
                 : pill(h, `reasoning: ${reasoning}`, "border border-line bg-paper text-ink-2"),
@@ -152,8 +149,8 @@ const headerView = (profile: ModelProfile, h: HtmlBuilder<Message>): Html => {
             integer(totalWins),
             totalGames === 0 ? null : percent(totalWins / totalGames, 0),
           ),
-          stat(h, "Cost per game", profile.kind === "bot" ? "free" : usd(profile.costPerGameUsd)),
-          stat(h, "Latency per wake", profile.kind === "bot" ? "—" : duration(profile.avgWakeMs)),
+          stat(h, "Cost per game", usd(profile.costPerGameUsd)),
+          stat(h, "Latency per wake", duration(profile.avgWakeMs)),
         ],
       ),
     ],

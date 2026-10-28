@@ -5,7 +5,7 @@ import { AsyncData } from "foldkit";
 import type { Html, HtmlBuilder } from "foldkit/html";
 
 import { isMockMode } from "../api/layer.ts";
-import { Message } from "../message.ts";
+import type { Message } from "../message.ts";
 import type { Model } from "../model.ts";
 import {
   AppRoute,
@@ -142,18 +142,6 @@ export const header = (model: Model, h: HtmlBuilder<Message>): Html => {
                     ["Mock data"],
                   )
                 : h.empty,
-              h.button(
-                [
-                  h.Type("button"),
-                  h.Class("rounded-md p-1.5 text-white/90 hover:bg-white/15 hover:text-white"),
-                  h.AriaLabel(
-                    model.theme === "Light" ? "Switch to dark theme" : "Switch to light theme",
-                  ),
-                  h.Title(model.theme === "Light" ? "Dark theme" : "Light theme"),
-                  h.OnClick(Message.ClickedToggleTheme()),
-                ],
-                [model.theme === "Light" ? moonIcon(h) : sunIcon(h)],
-              ),
               h.a(
                 [
                   h.Href(newRunRouter()),
@@ -175,40 +163,6 @@ export const header = (model: Model, h: HtmlBuilder<Message>): Html => {
     ],
   );
 };
-
-const moonIcon = (h: HtmlBuilder<Message>): Html =>
-  h.svg(
-    [
-      h.ViewBox("0 0 24 24"),
-      h.Class("h-5 w-5"),
-      h.Fill("none"),
-      h.Stroke("currentColor"),
-      h.StrokeWidth("2"),
-      h.AriaHidden(true),
-    ],
-    [h.path([h.D("M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"), h.StrokeLinejoin("round")])],
-  );
-
-const sunIcon = (h: HtmlBuilder<Message>): Html =>
-  h.svg(
-    [
-      h.ViewBox("0 0 24 24"),
-      h.Class("h-5 w-5"),
-      h.Fill("none"),
-      h.Stroke("currentColor"),
-      h.StrokeWidth("2"),
-      h.AriaHidden(true),
-    ],
-    [
-      h.circle([h.Cx("12"), h.Cy("12"), h.R("4")]),
-      h.path([
-        h.D(
-          "M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
-        ),
-        h.StrokeLinecap("round"),
-      ]),
-    ],
-  );
 
 export const footer = (h: HtmlBuilder<Message>): Html =>
   h.footer(

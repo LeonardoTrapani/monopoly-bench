@@ -31,18 +31,17 @@ import {
   winRate,
   type RankedEntry,
 } from "../domain/leaderboard.ts";
-import { providerColor, providerName } from "../domain/palette.ts";
+import { providerColor, providerName, providerOf } from "../domain/palette.ts";
 import { failWith, reload, succeedWith } from "../domain/remote.ts";
 import { aboutRouter, competitorHref, gameHref, gamesRouter, newRunRouter } from "../route.ts";
 import { scatterChart } from "../view/charts.ts";
+import { competitorIcon, providerIconUrl } from "../view/provider.ts";
 import {
   BUTTON_PRIMARY,
   BUTTON_SECONDARY,
-  botBadge,
   deedCard,
   emptyView,
   liveBadge,
-  providerDot,
   remote,
   sectionHeading,
   seatToken,
@@ -140,7 +139,7 @@ export type ViewInputs = Readonly<{ liveGames: AsyncData.AsyncData<GamesResponse
 const heroView = (model: Model, inputs: ViewInputs, h: HtmlBuilder<Message>): Html => {
   const leaderboard = AsyncData.getOrElse(model.leaderboard, () => null);
   const liveCount = AsyncData.getOrElse(inputs.liveGames, () => null)?.games.length ?? 0;
-  const llmCount = leaderboard?.entries.filter((entry) => entry.kind === "llm").length ?? 0;
+  const modelCount = leaderboard?.entries.length ?? 0;
 
   const gameCount =
     leaderboard === null
@@ -198,7 +197,7 @@ const heroView = (model: Model, inputs: ViewInputs, h: HtmlBuilder<Message>): Ht
           h.div(
             [h.Class("grid grid-cols-2 gap-3 self-center")],
             [
-              heroTile(h, "Models rated", integer(llmCount), `${model.players}-player table`),
+              heroTile(h, "Models rated", integer(modelCount), `${model.players}-player table`),
               heroTile(
                 h,
                 "Games played",
@@ -246,7 +245,13 @@ const leaderTile = (h: HtmlBuilder<Message>, leader: RankedEntry | undefined): H
               h.Class("block px-4 py-2.5 hover:bg-paper-2"),
             ],
             [
-              h.p([h.Class("display truncate text-lg text-ink")], [leader.entry.label]),
+              h.p(
+                [h.Class("flex items-center gap-2")],
+                [
+                  competitorIcon(h, leader.entry.competitorId, "sm"),
+                  h.span([h.Class("display truncate text-lg text-ink")], [leader.entry.label]),
+                ],
+              ),
               h.p(
                 [h.Class("num text-xs text-muted")],
                 [
@@ -314,6 +319,7 @@ const liveCard = (h: HtmlBuilder<Message>, game: GameSummary): Html =>
             [h.Class("flex items-center gap-2 text-sm")],
             [
               seatToken(h, seat.seat, "sm"),
+              competitorIcon(h, seat.competitorId, "xs"),
               h.span([h.Class("truncate text-ink")], [seat.label]),
               seat.bankruptAtTurn === null
                 ? h.empty
@@ -540,13 +546,7 @@ const leaderboardRow = (
 
   return h.keyed("tr")(
     entry.competitorId,
-    [
-      h.Class(
-        clsx("border-b border-line transition hover:bg-paper-2", {
-          "text-muted": entry.kind === "bot",
-        }),
-      ),
-    ],
+    [h.Class("border-b border-line transition hover:bg-paper-2")],
     [
       h.td(
         [h.Class("px-2 py-2.5 text-right")],
@@ -573,9 +573,12 @@ const leaderboardRow = (
         [h.Class("px-2 py-2.5")],
         [
           h.a(
-            [h.Href(competitorHref(entry.competitorId)), h.Class("group flex items-center gap-2")],
             [
-              providerDot(h, entry.competitorId),
+              h.Href(competitorHref(entry.competitorId)),
+              h.Class("group flex items-center gap-2.5"),
+            ],
+            [
+              competitorIcon(h, entry.competitorId, "md"),
               h.span(
                 [h.Class("min-w-0")],
                 [
@@ -589,7 +592,6 @@ const leaderboardRow = (
                   ),
                 ],
               ),
-              entry.kind === "bot" ? botBadge(h) : h.empty,
             ],
           ),
         ],
@@ -623,16 +625,8 @@ const leaderboardRow = (
       numericCell(h, decimal(entry.avgPlace, 2), ""),
       numericCell(h, moneyCompact(entry.avgNetWorth), "hidden md:table-cell"),
       numericCell(h, percent(entry.invalidRate), "hidden lg:table-cell"),
-      numericCell(
-        h,
-        entry.kind === "bot" ? "free" : usd(entry.costPerGameUsd),
-        "hidden md:table-cell",
-      ),
-      numericCell(
-        h,
-        entry.kind === "bot" ? "—" : duration(entry.avgWakeMs),
-        "hidden lg:table-cell",
-      ),
+      numericCell(h, usd(entry.costPerGameUsd), "hidden md:table-cell"),
+      numericCell(h, duration(entry.avgWakeMs), "hidden lg:table-cell"),
     ],
   );
 };
@@ -663,10 +657,11 @@ const scatterView = (leaderboard: Leaderboard, h: HtmlBuilder<Message>): Html =>
       key: row.entry.competitorId,
       label: row.entry.label,
       color: providerColor(row.entry.competitorId),
-      x: row.entry.kind === "bot" ? 0 : row.entry.costPerGameUsd,
+      icon: providerIconUrl(providerOf(row.entry.competitorId)),
+      x: row.entry.costPerGameUsd,
       y: row.entry.score,
-      isMuted: row.entry.kind === "bot",
-      tooltip: `${row.entry.label}: score ${decimal(row.entry.score)}, ${row.entry.kind === "bot" ? "free" : `${usd(row.entry.costPerGameUsd)} per game`}, ${plural(row.entry.games, "game")}`,
+      isMuted: false,
+      tooltip: `${row.entry.label} (${providerName(row.entry.competitorId)}): score ${decimal(row.entry.score)}, ${usd(row.entry.costPerGameUsd)} per game, ${plural(row.entry.games, "game")}`,
       href: competitorHref(row.entry.competitorId),
       onClick: null,
     })),
@@ -710,17 +705,18 @@ const headToHeadView = (leaderboard: Leaderboard, h: HtmlBuilder<Message>): Html
                       [h.Scope("col"), h.Class("h-36 w-11 p-0 align-bottom")],
                       [
                         h.div(
-                          [h.Class("flex h-36 w-11 items-end justify-center pb-1")],
+                          [h.Class("flex h-36 w-11 flex-col items-center justify-end gap-1 pb-1")],
                           [
                             h.span(
                               [
                                 h.Class(
-                                  "block max-h-36 truncate text-[11px] font-semibold text-ink-2 [writing-mode:vertical-rl] rotate-180",
+                                  "block max-h-30 truncate text-[11px] font-semibold text-ink-2 [writing-mode:vertical-rl] rotate-180",
                                 ),
                                 h.Title(column.entry.label),
                               ],
                               [column.entry.label],
                             ),
+                            competitorIcon(h, column.entry.competitorId, "xs"),
                           ],
                         ),
                       ],
@@ -740,12 +736,18 @@ const headToHeadView = (leaderboard: Leaderboard, h: HtmlBuilder<Message>): Html
                   h.th(
                     [
                       h.Scope("row"),
-                      h.Class(
-                        "max-w-40 truncate pr-2 text-right text-[11px] font-semibold text-ink-2",
-                      ),
+                      h.Class("max-w-44 pr-2 text-[11px] font-semibold text-ink-2"),
                       h.Title(row.entry.label),
                     ],
-                    [row.entry.label],
+                    [
+                      h.span(
+                        [h.Class("flex items-center justify-end gap-1.5")],
+                        [
+                          competitorIcon(h, row.entry.competitorId, "xs"),
+                          h.span([h.Class("truncate")], [row.entry.label]),
+                        ],
+                      ),
+                    ],
                   ),
                   ...top.map((column) => headToHeadCell(leaderboard, row, column, h)),
                 ],
@@ -817,12 +819,12 @@ const callToAction = (h: HtmlBuilder<Message>): Html =>
           h.div(
             [h.Class("p-6 sm:p-8")],
             [
-              h.p([h.Class("deed-kicker text-red")], ["Bring your own models"]),
+              h.p([h.Class("deed-kicker text-red")], ["Bring your own key"]),
               h.h2([h.Class("display mt-1 text-2xl text-ink sm:text-3xl")], ["Start a run"]),
               h.p(
                 [h.Class("mt-2 max-w-2xl text-sm text-ink-2")],
                 [
-                  "Pick 2–6 seats (any OpenRouter model, or a scripted bot as a baseline), a number of seeds and a budget. Every seed is played once per seat rotation, so each model sits in every chair with the same dice. Results feed the public leaderboard.",
+                  "Pick 2–6 models from OpenRouter's catalog, a number of seeds and a budget, and pay with your own OpenRouter key. Every seed is played once per seat rotation, so each model sits in every chair with the same dice. Results feed the public leaderboard.",
                 ],
               ),
             ],
@@ -862,9 +864,7 @@ export const view = Submodel.defineView<Model, Message, ViewInputs>((model, inpu
           ]),
           h.p(
             [h.Class("mt-2 text-xs text-muted")],
-            [
-              "Ratings are kept separately for each table size. Bots are scripted baselines. Click a column to sort.",
-            ],
+            ["Ratings are kept separately for each table size. Click a column to sort."],
           ),
         ],
       ),

@@ -55,8 +55,10 @@ const QWEN = "qwen/qwen3.8-max-0902";
 const GLM = "z-ai/glm-5.3";
 const HAIKU = "anthropic/claude-haiku-5.5";
 const MISTRAL = "mistralai/mistral-large-4-0";
-const HEURISTIC = "bot:heuristic";
-const RANDOM = "bot:random";
+const FLASH = "google/gemini-4-flash";
+const MINIMAX = "minimax/minimax-m3";
+const MAVERICK = "meta-llama/llama-5-maverick";
+const EURYALE = "sao10k/l4-euryale-90b";
 
 export const LIVE_GAME_ID = "g-live-frontier-4p";
 
@@ -80,7 +82,7 @@ export const GAME_DEFS: ReadonlyArray<MockGameDef> = [
   {
     id: "g-open-4p-01",
     runId: "run-open-4p",
-    lineup: [GROK, ASTRA, DEEPSEEK, HEURISTIC],
+    lineup: [GROK, ASTRA, DEEPSEEK, MINIMAX],
     source: { kind: "Fixture", name: "sample-4p" },
     startedAt: "2026-10-27T18:40:00.000Z",
     isLive: false,
@@ -96,7 +98,7 @@ export const GAME_DEFS: ReadonlyArray<MockGameDef> = [
   {
     id: "g-heads-up-01",
     runId: "run-heads-up",
-    lineup: [OPUS, RANDOM],
+    lineup: [OPUS, FLASH],
     source: { kind: "Fixture", name: "sample-2p" },
     startedAt: "2026-10-26T10:20:00.000Z",
     isLive: false,
@@ -125,7 +127,7 @@ export const GAME_DEFS: ReadonlyArray<MockGameDef> = [
   {
     id: "g-big-5p-01",
     runId: "run-big-5p",
-    lineup: [SONNET, ASTRA, DEEPSEEK, KIMI, HEURISTIC],
+    lineup: [SONNET, ASTRA, DEEPSEEK, KIMI, MAVERICK],
     source: {
       kind: "Bots",
       seed: "mock-5p",
@@ -138,7 +140,7 @@ export const GAME_DEFS: ReadonlyArray<MockGameDef> = [
   {
     id: "g-big-6p-01",
     runId: "run-big-6p",
-    lineup: [OPUS, SOL, GEMINI, GLM, QWEN, RANDOM],
+    lineup: [OPUS, SOL, GEMINI, GLM, QWEN, EURYALE],
     source: {
       kind: "Bots",
       seed: "mock-6p",
@@ -285,31 +287,28 @@ const seatSummaries = (
   return state.players.map((player) => {
     const competitor = competitorById(player.competitorId);
     const row = rows.find((standing) => standing.seat === player.seat);
-    const isBot = player.competitorId.startsWith("bot:");
 
-    const wakes = isBot
-      ? 0
-      : Math.round(state.control.turn * between(`${def.id}:${player.seat}:wakes`, 1.4, 2.2));
+    const wakes = Math.round(
+      state.control.turn * between(`${def.id}:${player.seat}:wakes`, 1.4, 2.2),
+    );
 
     return {
       seat: player.seat,
       competitorId: player.competitorId,
       label: player.label,
-      kind: isBot ? "bot" : "llm",
+      kind: "llm",
       finalRank: isFinished ? (row?.rank ?? null) : null,
       netWorth: row?.netWorth ?? null,
       cash: player.cash,
       bankruptAtTurn: player.bankruptcy?.turn ?? null,
-      costUsd: isBot ? 0 : ((competitor?.costPerGameUsd ?? 1) * state.control.turn) / 150,
+      costUsd: ((competitor?.costPerGameUsd ?? 1) * state.control.turn) / 150,
       wakes,
-      invalidActions: isBot
-        ? 0
-        : Math.round(
-            wakes *
-              (competitor?.invalidRate ?? 0.01) *
-              between(`${def.id}:${player.seat}:inv`, 0.5, 1.5),
-          ),
-      timeouts: isBot ? 0 : intBetween(`${def.id}:${player.seat}:timeouts`, 0, 1),
+      invalidActions: Math.round(
+        wakes *
+          (competitor?.invalidRate ?? 0.01) *
+          between(`${def.id}:${player.seat}:inv`, 0.5, 1.5),
+      ),
+      timeouts: intBetween(`${def.id}:${player.seat}:timeouts`, 0, 1),
     };
   });
 };

@@ -1,4 +1,5 @@
 /** Colors of the board groups, the seats and the providers (hex, usable in SVG and CSS). */
+import { providerSlugOf } from "@mb/api";
 import { GROUP_NAMES, type GroupId, type Seat } from "@mb/engine";
 
 /** The eight classic property colors, plus railroads and utilities. */
@@ -50,65 +51,86 @@ export const SEAT_INK: Readonly<Record<Seat, string>> = {
   F: "#ffffff",
 };
 
-const PROVIDER_COLORS: ReadonlyArray<readonly [string, string]> = [
-  ["anthropic", "#d4693b"],
-  ["openai", "#10a37f"],
-  ["google", "#4285f4"],
-  ["x-ai", "#3d3d3d"],
-  ["deepseek", "#4d6bfe"],
-  ["qwen", "#7b3fe4"],
-  ["moonshotai", "#16a3a3"],
-  ["z-ai", "#c2185b"],
-  ["mistralai", "#ff7000"],
-  ["minimax", "#e8384f"],
-  ["meta-llama", "#0866ff"],
-  ["bot", "#7c8a7e"],
+/**
+ * Display name and brand color of OpenRouter providers, by provider slug (the model id prefix,
+ * see `providerSlugOf`). Unknown providers show their slug and a neutral color.
+ */
+const PROVIDERS: ReadonlyArray<readonly [slug: string, name: string, color: string]> = [
+  ["anthropic", "Anthropic", "#d4693b"],
+  ["openai", "OpenAI", "#10a37f"],
+  ["google", "Google", "#4285f4"],
+  ["x-ai", "xAI", "#3d3d3d"],
+  ["deepseek", "DeepSeek", "#4d6bfe"],
+  ["qwen", "Qwen", "#7b3fe4"],
+  ["moonshotai", "Moonshot AI", "#16a3a3"],
+  ["z-ai", "Z.ai", "#c2185b"],
+  ["thudm", "Zhipu AI", "#3859ff"],
+  ["mistralai", "Mistral", "#ff7000"],
+  ["minimax", "MiniMax", "#e8384f"],
+  ["meta-llama", "Meta", "#0866ff"],
+  ["meta", "Meta", "#0866ff"],
+  ["nvidia", "NVIDIA", "#76b900"],
+  ["cohere", "Cohere", "#39594d"],
+  ["amazon", "Amazon", "#ff9900"],
+  ["bytedance-seed", "ByteDance Seed", "#325ab4"],
+  ["bytedance", "ByteDance", "#325ab4"],
+  ["xiaomi", "Xiaomi", "#ff6900"],
+  ["microsoft", "Microsoft", "#00a4ef"],
+  ["ai21", "AI21 Labs", "#e5398b"],
+  ["inflection", "Inflection", "#2f2f2f"],
+  ["perplexity", "Perplexity", "#20808d"],
+  ["openrouter", "OpenRouter", "#6467f2"],
+  ["arcee-ai", "Arcee AI", "#1e5bd8"],
+  ["baidu", "Baidu", "#2932e1"],
+  ["tencent", "Tencent", "#0052d9"],
+  ["stepfun-ai", "StepFun", "#005aff"],
+  ["nousresearch", "Nous Research", "#2b2b2b"],
+  ["liquid", "Liquid AI", "#4f46e5"],
+  ["inception", "Inception", "#3b3b3b"],
+  ["ibm-granite", "IBM", "#0f62fe"],
+  ["alibaba", "Alibaba", "#ff6a00"],
+  ["01-ai", "01.AI", "#14a37f"],
+  ["upstage", "Upstage", "#805cfb"],
+  ["allenai", "Ai2", "#f0529c"],
+  ["deepcogito", "Deep Cogito", "#4b5563"],
+  ["meituan", "Meituan", "#d9a300"],
+  ["inclusionai", "inclusionAI", "#1677ff"],
+  ["baichuan", "Baichuan", "#ff6b00"],
+  ["kwaipilot", "Kwaipilot", "#ff5000"],
+  ["cognitivecomputations", "Cognitive Computations", "#1a73e8"],
+  ["rekaai", "Reka", "#6c2bd9"],
+  ["bot", "Bot", "#7c8a7e"],
 ];
 
 const FALLBACK_PROVIDER_COLOR = "#5b6b5e";
 
-/** Provider slug of a competitor id: `anthropic/claude-x:high` → `anthropic`, `bot:random` → `bot`. */
-export const providerOf = (competitorId: string): string => {
-  if (competitorId.startsWith("bot:")) return "bot";
+/**
+ * Provider slug of a competitor id: `anthropic/claude-x:high` → `anthropic`,
+ * `~google/gemini-latest` → `google`; legacy bot ids (`bot:random`) → `bot`.
+ */
+export const providerOf = (competitorId: string): string =>
+  competitorId.startsWith("bot:") ? "bot" : providerSlugOf(competitorId);
 
-  const slash = competitorId.indexOf("/");
+const providerRow = (slug: string) => PROVIDERS.find(([candidate]) => candidate === slug);
 
-  return slash < 0 ? competitorId : competitorId.slice(0, slash);
-};
+/** Display name of a provider slug; unknown providers keep their slug. */
+export const providerNameOfSlug = (slug: string): string => providerRow(slug)?.[1] ?? slug;
 
-export const providerColor = (competitorId: string): string => {
-  const provider = providerOf(competitorId);
-  const entry = PROVIDER_COLORS.find(([name]) => name === provider);
+export const providerColorOfSlug = (slug: string): string =>
+  providerRow(slug)?.[2] ?? FALLBACK_PROVIDER_COLOR;
 
-  return entry === undefined ? FALLBACK_PROVIDER_COLOR : entry[1];
-};
+export const providerColor = (competitorId: string): string =>
+  providerColorOfSlug(providerOf(competitorId));
 
-const PROVIDER_NAMES: ReadonlyArray<readonly [string, string]> = [
-  ["anthropic", "Anthropic"],
-  ["openai", "OpenAI"],
-  ["google", "Google"],
-  ["x-ai", "xAI"],
-  ["deepseek", "DeepSeek"],
-  ["qwen", "Qwen"],
-  ["moonshotai", "Moonshot AI"],
-  ["z-ai", "Z.ai"],
-  ["mistralai", "Mistral"],
-  ["minimax", "MiniMax"],
-  ["meta-llama", "Meta"],
-  ["bot", "Baseline bot"],
-];
+export const providerName = (competitorId: string): string =>
+  providerNameOfSlug(providerOf(competitorId));
 
-export const providerName = (competitorId: string): string => {
-  const provider = providerOf(competitorId);
+const REASONING_LEVELS: ReadonlyArray<string> = ["low", "medium", "high"];
 
-  return PROVIDER_NAMES.find(([name]) => name === provider)?.[1] ?? provider;
-};
-
-/** Reasoning suffix of a competitor id (`…:high`), if any. */
+/** Reasoning suffix of a competitor id (`…:high`), if any (`…:free` is part of the model id). */
 export const reasoningOf = (competitorId: string): string | null => {
-  if (competitorId.startsWith("bot:")) return null;
-
   const colon = competitorId.lastIndexOf(":");
+  const suffix = colon < 0 ? null : competitorId.slice(colon + 1);
 
-  return colon < 0 ? null : competitorId.slice(colon + 1);
+  return suffix !== null && REASONING_LEVELS.includes(suffix) ? suffix : null;
 };

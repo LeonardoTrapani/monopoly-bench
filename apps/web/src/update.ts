@@ -1,4 +1,4 @@
-import { Equal, Option } from "effect";
+import { Equal, Option, Record } from "effect";
 import { Update } from "foldkit";
 import { UrlRequest } from "foldkit/navigation";
 import { modifyFields } from "foldkit/struct";
@@ -9,13 +9,13 @@ import {
   FetchLiveGames,
   LoadExternal,
   NavigateInternal,
-  SaveTheme,
+  SaveRunTokens,
   WaitBeforeLivePoll,
 } from "./command.ts";
 import { failWith, reload, succeedWith } from "./domain/remote.ts";
-import { initPage } from "./init.ts";
+import { fragmentCommands, initPage } from "./init.ts";
 import { Message } from "./message.ts";
-import { Page, type Model } from "./model.ts";
+import { Page, runCredentials, type Model } from "./model.ts";
 import * as Competitor from "./page/competitor.ts";
 import * as Game from "./page/game/index.ts";
 import * as Games from "./page/games.ts";
@@ -74,9 +74,9 @@ const foldRuns = Update.foldChild({
   toParentMessage: (message) => Message.GotRunsMessage({ message }),
 });
 
-const foldRun = (apiKey: string) =>
+const foldRun = (credentials: Run.Credentials) =>
   Update.foldChild({
-    update: (run: Run.Model, message: Run.Message) => Run.update(run, message, apiKey),
+    update: (run: Run.Model, message: Run.Message) => Run.update(run, message, credentials),
     read: (model: Model) =>
       Page.matchOrElse(model.page, { Run: ({ run }) => Option.some(run) }, () => Option.none()),
     write: (model, nextRun) => writePage(model, Page.Run({ run: nextRun })),
@@ -88,8 +88,22 @@ const foldNewRunOutMessage = NewRun.OutMessage.match<Step>({
     ({ apiKey }) =>
     (model) => ({ model: modifyFields(model, { apiKey: () => apiKey }) }),
   CreatedRun:
-    ({ runId }) =>
-    (model) => ({ model, commands: [NavigateInternal({ url: runHref(runId) })] }),
+    ({ runId, cancelToken }) =>
+    (model) => {
+      const navigate = NavigateInternal({ url: runHref(runId) });
+
+      return Option.match(cancelToken, {
+        onNone: () => ({ model, commands: [navigate] }),
+        onSome: (token) => {
+          const runTokens = Record.set(model.runTokens, runId, token);
+
+          return {
+            model: modifyFields(model, { runTokens: () => runTokens }),
+            commands: [SaveRunTokens({ runTokens }), navigate],
+          };
+        },
+      });
+    },
 });
 
 const foldNewRun = Update.foldChild({
@@ -117,25 +131,18 @@ export const update = (model: Model, message: Message) =>
     ChangedUrl: ({ url }) => {
       const nextRoute = urlToAppRoute(url);
 
-      if (Equal.equals(nextRoute, model.route)) return { model };
+      if (Equal.equals(nextRoute, model.route)) return { model, commands: fragmentCommands(url) };
 
       const page = initPage(nextRoute, model.apiKey);
 
       return {
         model: modifyFields(model, { route: () => nextRoute, page: () => page.model }),
-        commands: page.commands ?? [],
+        commands: [...(page.commands ?? []), ...fragmentCommands(url)],
       };
     },
 
-    ClickedToggleTheme: () => {
-      const theme = model.theme === "Light" ? "Dark" : "Light";
-
-      return {
-        model: modifyFields(model, { theme: () => theme }),
-        commands: [SaveTheme({ theme })],
-      };
-    },
-    CompletedSaveTheme: () => ({ model }),
+    CompletedScrollToFragment: () => ({ model }),
+    CompletedSaveRunTokens: () => ({ model }),
 
     SucceededFetchLiveGames: ({ response }) => ({
       model: modifyFields(model, { liveGames: succeedWith(response) }),
@@ -155,6 +162,6 @@ export const update = (model: Model, message: Message) =>
     GotGameMessage: ({ message }) => foldGame(model, message),
     GotCompetitorMessage: ({ message }) => foldCompetitor(model, message),
     GotRunsMessage: ({ message }) => foldRuns(model, message),
-    GotRunMessage: ({ message }) => foldRun(model.apiKey)(model, message),
+    GotRunMessage: ({ message }) => foldRun(runCredentials(model))(model, message),
     GotNewRunMessage: ({ message }) => foldNewRun(model, message),
   });

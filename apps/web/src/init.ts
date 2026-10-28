@@ -6,9 +6,15 @@ import type { Url } from "foldkit/url";
 import { BrowserKeyValueStore } from "@effect/platform-browser";
 
 import type { Api } from "./api/api.ts";
-import { API_KEY_STORAGE_KEY, FetchLiveGames, THEME_STORAGE_KEY } from "./command.ts";
+import {
+  API_KEY_STORAGE_KEY,
+  FetchLiveGames,
+  LEGACY_THEME_STORAGE_KEY,
+  RUN_TOKENS_STORAGE_KEY,
+  ScrollToFragment,
+} from "./command.ts";
 import { Message } from "./message.ts";
-import { Flags, LiveGamesAsyncData, Page, Theme, type Model } from "./model.ts";
+import { Flags, LiveGamesAsyncData, Page, RunTokens, type Model } from "./model.ts";
 import * as Competitor from "./page/competitor.ts";
 import * as Game from "./page/game/index.ts";
 import * as Games from "./page/games.ts";
@@ -16,29 +22,41 @@ import * as Home from "./page/home.ts";
 import * as NewRun from "./page/newRun.ts";
 import * as Run from "./page/run.ts";
 import * as Runs from "./page/runs.ts";
-import { AppRoute, urlToAppRoute } from "./route.ts";
+import { AppRoute, decodeUriPart, urlToAppRoute } from "./route.ts";
 
-const decodeTheme = Schema.decodeUnknownOption(Theme);
+const decodeRunTokens = Schema.decodeUnknownOption(Schema.fromJsonString(RunTokens));
 
-/** Reads saved preferences from localStorage (theme, API key). */
+/**
+ * Reads what this browser keeps in localStorage: the bench API key and the cancel tokens of
+ * own-key runs. Also drops the preference of the removed dark theme.
+ */
 export const flags: Effect.Effect<Flags> = Effect.gen(function* () {
   const store = yield* KeyValueStore.KeyValueStore;
 
-  const theme = Option.flatMap(
-    Option.fromNullishOr(yield* store.get(THEME_STORAGE_KEY)),
-    decodeTheme,
-  );
+  yield* store.remove(LEGACY_THEME_STORAGE_KEY);
 
   const apiKey = Option.fromNullishOr(yield* store.get(API_KEY_STORAGE_KEY));
 
+  const runTokens = Option.flatMap(
+    Option.fromNullishOr(yield* store.get(RUN_TOKENS_STORAGE_KEY)),
+    decodeRunTokens,
+  );
+
   return Flags.make({
-    theme: Option.getOrElse(theme, (): Theme => "Light"),
     apiKey: Option.getOrElse(apiKey, () => ""),
+    runTokens: Option.getOrElse(runTokens, () => ({})),
   });
 }).pipe(
-  Effect.catch(() => Effect.succeed(Flags.make({ theme: "Light", apiKey: "" }))),
+  Effect.catch(() => Effect.succeed(Flags.make({ apiKey: "", runTokens: {} }))),
   Effect.provide(BrowserKeyValueStore.layerLocalStorage),
 );
+
+/** Scrolls to the URL fragment, if any, once the page is drawn. */
+export const fragmentCommands = (url: Url) =>
+  Option.match(url.hash, {
+    onNone: () => [],
+    onSome: (id) => [ScrollToFragment({ id: decodeUriPart(id) })],
+  });
 
 type PageInit = Update.Return<Page, Message, Api>;
 
@@ -95,10 +113,10 @@ export const init: Runtime.RoutingApplicationInit<Model, Message, Flags, Api> = 
     model: {
       route,
       page: page.model,
-      theme: initialFlags.theme,
       apiKey: initialFlags.apiKey,
+      runTokens: initialFlags.runTokens,
       liveGames: LiveGamesAsyncData.Loading(),
     },
-    commands: [...(page.commands ?? []), FetchLiveGames()],
+    commands: [...(page.commands ?? []), FetchLiveGames(), ...fragmentCommands(url)],
   };
 };

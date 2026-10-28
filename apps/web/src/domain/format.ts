@@ -71,6 +71,19 @@ export const tokens = (count: number): string => {
   return `${count}`;
 };
 
+/** A context window: `131k`, `1M`, `1.05M`. */
+export const contextWindow = (count: number): string =>
+  count >= MILLION
+    ? `${Number.parseFloat((count / MILLION).toFixed(2))}M`
+    : `${Math.round(count / THOUSAND)}k`;
+
+/** A price per million tokens: `$3`, `$0.30`, `$1.25`, `$0.025`. */
+export const perMTok = (price: number): string => {
+  if (Number.isInteger(price)) return `$${price}`;
+
+  return price < 0.1 ? `$${price.toFixed(3).replace(/0$/, "")}` : `$${price.toFixed(2)}`;
+};
+
 /** One decimal: `23.4`. */
 export const decimal = (value: number, digits = 1): string => value.toFixed(digits);
 
