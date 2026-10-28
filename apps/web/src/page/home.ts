@@ -318,8 +318,7 @@ const liveCard = (h: HtmlBuilder<Message>, game: GameSummary): Html =>
             seat.seat,
             [h.Class("flex items-center gap-2 text-sm")],
             [
-              seatToken(h, seat.seat, "sm"),
-              competitorIcon(h, seat.competitorId, "xs"),
+              seatToken(h, seat, "sm"),
               h.span([h.Class("truncate text-ink")], [seat.label]),
               seat.bankruptAtTurn === null
                 ? h.empty

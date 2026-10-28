@@ -8,7 +8,8 @@ import clsx from "clsx";
 import { AsyncData } from "foldkit";
 import type { Html, HtmlBuilder } from "foldkit/html";
 
-import { SEAT_COLORS, SEAT_INK } from "../domain/palette.ts";
+import { providerNameOfSlug, providerOf, SEAT_COLORS, SEAT_INK } from "../domain/palette.ts";
+import { providerIconUrl, providerInitials } from "./provider.ts";
 
 export const BUTTON_PRIMARY =
   "inline-flex items-center justify-center gap-2 rounded-md border-[1.5px] border-line-strong bg-red px-4 py-2 text-sm font-semibold text-white shadow-[3px_3px_0_var(--shadow)] transition hover:bg-red-deep focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red active:translate-x-px active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50";
@@ -91,28 +92,89 @@ export const sectionHeading = <M>(
     ],
   );
 
-/** A round seat token with its letter. */
+/** Who sits in a seat: the seat (its color) and the model playing it (its logo and name). */
+export interface SeatPlayer {
+  readonly seat: Seat;
+  readonly competitorId: string;
+  readonly label: string;
+}
+
+/** The player of `seat` among `players` (a bare seat if the game has no such player). */
+export const seatPlayer = (players: ReadonlyArray<SeatPlayer>, seat: Seat): SeatPlayer =>
+  players.find((player) => player.seat === seat) ?? { seat, competitorId: "", label: seat };
+
+/**
+ * A round seat token: the model's provider logo on a white disc, ringed with the seat color (two
+ * models of one provider stay apart by color). Without a model it shows the seat letter.
+ */
 export const seatToken = <M>(
   h: HtmlBuilder<M>,
-  seat: Seat,
-  size: "sm" | "md" | "lg" = "md",
-): Html =>
-  h.span(
+  player: SeatPlayer,
+  size: "xs" | "sm" | "md" | "lg" = "md",
+): Html => {
+  const slug = providerOf(player.competitorId);
+  const url = player.competitorId === "" ? null : providerIconUrl(slug);
+
+  return h.span(
     [
       h.Class(
         clsx(
-          "inline-flex shrink-0 items-center justify-center rounded-full border-2 border-white font-bold shadow-[0_1px_0_1px_rgba(0,0,0,0.25)]",
+          "inline-flex shrink-0 items-center justify-center rounded-full font-bold leading-none shadow-[0_1px_0_1px_rgba(0,0,0,0.25)] select-none",
+          url === null ? "" : "bg-white",
           {
-            "h-5 w-5 text-[10px]": size === "sm",
-            "h-7 w-7 text-xs": size === "md",
-            "h-10 w-10 text-base": size === "lg",
+            "h-[18px] w-[18px] border-2 text-[7px]": size === "xs",
+            "h-6 w-6 border-[2.5px] text-[9px]": size === "sm",
+            "h-8 w-8 border-[3px] text-[11px]": size === "md",
+            "h-11 w-11 border-4 text-sm": size === "lg",
           },
         ),
       ),
-      h.Style({ background: SEAT_COLORS[seat], color: SEAT_INK[seat] }),
-      h.AriaLabel(`Seat ${seat}`),
+      h.Style(
+        url === null
+          ? {
+              background: SEAT_COLORS[player.seat],
+              color: SEAT_INK[player.seat],
+              borderColor: "#ffffff",
+            }
+          : { borderColor: SEAT_COLORS[player.seat] },
+      ),
+      h.Title(player.label),
+      h.AriaLabel(player.label),
     ],
-    [seat],
+    [
+      url === null
+        ? player.competitorId === ""
+          ? player.seat
+          : providerInitials(providerNameOfSlug(slug))
+        : h.img([
+            h.Src(url),
+            h.Alt(""),
+            h.Class(
+              clsx({
+                "h-2.5 w-2.5": size === "xs",
+                "h-3.5 w-3.5": size === "sm",
+                "h-[18px] w-[18px]": size === "md",
+                "h-6 w-6": size === "lg",
+              }),
+            ),
+            h.Decoding("async"),
+          ]),
+    ],
+  );
+};
+
+/** A player named inline in a sentence: their token and model name. */
+export const playerTag = <M>(h: HtmlBuilder<M>, player: SeatPlayer): Html =>
+  h.span(
+    [h.Class("inline-flex max-w-full items-center gap-1 align-middle font-semibold text-ink")],
+    [seatToken(h, player, "xs"), h.span([h.Class("truncate")], [player.label])],
+  );
+
+/** A list of players named inline (`A, B and C` as tags). */
+export const playerTags = <M>(h: HtmlBuilder<M>, players: ReadonlyArray<SeatPlayer>): Html =>
+  h.span(
+    [h.Class("inline-flex flex-wrap items-center gap-x-1.5 gap-y-1 align-middle")],
+    players.map((player) => playerTag(h, player)),
   );
 
 export const pill = <M>(h: HtmlBuilder<M>, text: string, className: string): Html =>

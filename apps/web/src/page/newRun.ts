@@ -47,16 +47,10 @@ import {
   type FieldError,
   type ValidRun,
 } from "../domain/runForm.ts";
+import { SEAT_COLORS } from "../domain/palette.ts";
 import { aboutRouter } from "../route.ts";
 import { providerIcon } from "../view/provider.ts";
-import {
-  BUTTON_GHOST,
-  BUTTON_PRIMARY,
-  BUTTON_SECONDARY,
-  INPUT,
-  LABEL,
-  seatToken,
-} from "../view/ui.ts";
+import { BUTTON_GHOST, BUTTON_PRIMARY, BUTTON_SECONDARY, INPUT, LABEL } from "../view/ui.ts";
 
 const API_KEY_STORAGE_KEY = "mb.apiKey";
 
@@ -810,8 +804,13 @@ const seatCard = (
       h.div(
         [h.Class("flex items-center gap-2")],
         [
-          seatToken(h, letter, "md"),
-          h.span([h.Class("text-sm font-semibold text-ink")], [`Seat ${letter}`]),
+          h.span([
+            h.Class(
+              "h-3.5 w-3.5 rounded-full border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,0.25)]",
+            ),
+            h.Style({ background: SEAT_COLORS[letter] }),
+          ]),
+          h.span([h.Class("text-sm font-semibold text-ink")], [`Seat ${index + 1}`]),
           h.button(
             [
               h.Type("button"),
@@ -819,7 +818,7 @@ const seatCard = (
                 "ml-auto rounded px-2 py-1 text-xs font-semibold text-muted hover:bg-red/10 hover:text-red disabled:opacity-30",
               ),
               h.Disabled(!canRemove),
-              h.AriaLabel(`Remove seat ${letter}`),
+              h.AriaLabel(`Remove seat ${index + 1}`),
               h.OnClick(Message.ClickedRemoveSeat({ seatId })),
             ],
             ["Remove"],

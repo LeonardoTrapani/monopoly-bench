@@ -6,6 +6,7 @@ import { moneyCompact } from "../../../domain/format.ts";
 import { SEAT_COLORS } from "../../../domain/palette.ts";
 import { worthsOf, type MarkerKind, type Replay } from "../../../domain/replay.ts";
 import { lineChart } from "../../../view/charts.ts";
+import { seatToken } from "../../../view/ui.ts";
 import { Message } from "../message.ts";
 import { SPEEDS, type Model } from "../model.ts";
 
@@ -224,7 +225,7 @@ export const worthChartView = (
 
     return {
       key: seat.seat,
-      label: seat.seat,
+      label: seat.label,
       color: SEAT_COLORS[seat.seat],
       points: [
         ...replay.turns.map((mark): readonly [number, number] => [
@@ -250,7 +251,7 @@ export const worthChartView = (
         ariaLabel: "Net worth of each seat over the game",
         bands: replay.turns.map((mark, position) => ({
           x: mark.turn,
-          tooltip: `Turn ${mark.turn}: ${seats.map((seat, index) => `${seat.seat} ${moneyCompact(mark.worths[index] ?? 0)}`).join(" · ")}`,
+          tooltip: `Turn ${mark.turn}: ${seats.map((seat, index) => `${seat.label} ${moneyCompact(mark.worths[index] ?? 0)}`).join(" · ")}`,
           onClick: Message.ClickedTurn({ position }),
         })),
       }),
@@ -265,7 +266,7 @@ export const worthChartView = (
                 h.Class("inline-block h-0.5 w-4 rounded"),
                 h.Style({ background: SEAT_COLORS[seat.seat] }),
               ]),
-              h.span([h.Class("font-bold text-ink")], [seat.seat]),
+              seatToken(h, seat, "xs"),
               seat.label,
             ],
           ),

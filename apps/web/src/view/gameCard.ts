@@ -5,7 +5,6 @@ import type { Html, HtmlBuilder } from "foldkit/html";
 
 import { END_REASON_TEXT, ordinal, timestamp, usd } from "../domain/format.ts";
 import { gameHref } from "../route.ts";
-import { competitorIcon } from "./provider.ts";
 import { gameStatusBadge, seatToken } from "./ui.ts";
 
 const seatsCell = <M>(h: HtmlBuilder<M>, game: GameSummary): Html =>
@@ -18,8 +17,7 @@ const seatsCell = <M>(h: HtmlBuilder<M>, game: GameSummary): Html =>
           seat.seat,
           [h.Class("flex items-center gap-2 text-sm")],
           [
-            seatToken(h, seat.seat, "sm"),
-            competitorIcon(h, seat.competitorId, "xs"),
+            seatToken(h, seat, "sm"),
             h.span(
               [
                 h.Class(

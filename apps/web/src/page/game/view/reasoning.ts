@@ -10,7 +10,7 @@ import { WakeReason as WakeReasonSchema } from "@mb/engine";
 
 import { tokens, usd } from "../../../domain/format.ts";
 import { frameLabelOf, wakeReasonDescription, wakeReasonLabel } from "../../../domain/wake.ts";
-import { emptyView, errorView, loadingView, seatToken } from "../../../view/ui.ts";
+import { emptyView, errorView, loadingView, seatPlayer, seatToken } from "../../../view/ui.ts";
 import type { LiveWake } from "../model.ts";
 
 /** A wake as shown in the panel, from a stored transcript or the live feed. */
@@ -137,10 +137,10 @@ const wakeCardView = <M>(h: HtmlBuilder<M>, card: WakeCard, labels: GameConfig["
       h.div(
         [h.Class("mb-2 flex flex-wrap items-center gap-2")],
         [
-          seatToken(h, card.seat, "sm"),
+          seatToken(h, seatPlayer(labels, card.seat), "sm"),
           h.span(
             [h.Class("text-sm font-semibold text-ink")],
-            [labels.find((seat) => seat.seat === card.seat)?.label ?? card.seat],
+            [seatPlayer(labels, card.seat).label],
           ),
           h.span(
             [h.Class("text-xs text-muted")],
@@ -241,19 +241,19 @@ const filterSelect = <M>(h: HtmlBuilder<M>, input: ReasoningInput<M>): Html =>
   h.label(
     [h.Class("flex items-center gap-2 text-xs font-semibold text-ink-2")],
     [
-      "Seat",
+      "Player",
       h.select(
         [
           h.Class("rounded border border-line bg-paper px-2 py-1 text-xs text-ink"),
           h.OnChange(input.onFilter),
-          h.AriaLabel("Filter wakes by seat"),
+          h.AriaLabel("Filter wakes by player"),
         ],
         [
-          h.option([h.Value("all"), h.Selected(Option.isNone(input.seatFilter))], ["All seats"]),
+          h.option([h.Value("all"), h.Selected(Option.isNone(input.seatFilter))], ["All players"]),
           ...input.seats.map((seat) =>
             h.option(
               [h.Value(seat.seat), h.Selected(Option.contains(input.seatFilter, seat.seat))],
-              [`${seat.seat} · ${seat.label}`],
+              [seat.label],
             ),
           ),
         ],

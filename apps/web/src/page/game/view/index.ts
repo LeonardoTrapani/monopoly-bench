@@ -155,6 +155,7 @@ const readyView = (
 
   const tokens = state.players.map((player, index) => ({
     seat: player.seat,
+    competitorId: player.competitorId,
     position: player.position,
     laps: current.laps[index] ?? 0,
     isJailed: player.inJail,
