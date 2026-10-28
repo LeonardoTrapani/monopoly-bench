@@ -45,7 +45,7 @@ code and this document disagree, fix one of them in the same change.
 | Lint            | Oxlint through Vite+, type-aware, plus vendored anti-slop rules (`tools/oxlint/anti-slop`)   |
 | Core library    | Effect **4.0.0** pinned everywhere (Foldkit requires exactly 4.0.0)                          |
 | Frontend        | Foldkit (Elm architecture on Effect), Tailwind, served as Worker static assets               |
-| Agents          | `@earendil-works/pi-agent-core`, `pi-ai` (OpenRouter), `pi-durable` (Durable Object storage) |
+| Agents          | `@earendil-works/pi-agent-core`, `pi-ai` (OpenRouter); sessions persisted in PlayerDO SQLite |
 | Infra           | Cloudflare Workers, Durable Objects, D1, R2 — defined with Alchemy v2                        |
 
 ```
@@ -429,6 +429,9 @@ left to decide. Parameter schemas are derived from the engine's Effect schemas.
 
 `maxToolCallsPerWake` (default 24), `maxInvalidPerWake` (6), `wakeTimeoutMs`
 (180 000). Usage (input/output/reasoning tokens, cost, latency) is recorded per wake.
+A model that stops without calling an answering tool is asked again in the same
+conversation; each such stop counts as an invalid action. Calls after the answer, or
+over the call limit, are refused without counting as invalid.
 
 ### 6.5 Defaults on timeout or failure
 
@@ -456,12 +459,16 @@ deeds from the cheapest), then pay or bankruptcy. Each default is recorded.
   commands through the engine, broadcasts events to spectators over hibernatable
   WebSockets, writes summaries to D1 at turn end, archives to R2 at the end, then
   notifies its RunDO.
-- **PlayerDO** (one per LLM seat per game): runs the Pi agent for a wake (pi-durable on
-  Durable Object SQLite storage; alarm-driven so no request stays open while the model
-  thinks). Tools call GameDO RPC (`submit`, `done`, `inspect`). Every RPC carries
-  `(gameId, seat, decisionId, callId)`; duplicates are ignored (idempotency).
+- **PlayerDO** (one per LLM seat per game): runs the Pi agent for a wake
+  (`pi-agent-core` directly, the same loop as local simulations; the session's messages
+  are persisted in the object's SQLite; alarm-driven so no request stays open while the
+  model thinks). Tools call GameDO RPC (`submit`, `done`, `inspect`). Every RPC carries
+  `(gameId, seat, decisionId, callId)`; duplicates are ignored (idempotency). A wake cut
+  off by an eviction is not re-run: it is reported and GameDO applies the default.
+  `pi-durable` was evaluated and not used (reasons in `apps/worker/README.md`).
 - **RunDO** (one per run): queue of games, concurrency limit, budget accounting,
-  ratings update when a game finishes.
+  ratings update when a game finishes (a version-guarded D1 batch, since several runs
+  may finish games at once).
 - Bot seats run inside GameDO.
 
 ### 7.2 API
@@ -472,21 +479,27 @@ Public (read-only, CORS open):
 - `GET /api/models`, `GET /api/models/:id`
 - `GET /api/runs`, `GET /api/runs/:id`
 - `GET /api/games?status=live|finished&players=&model=`, `GET /api/games/:id`
-- `GET /api/games/:id/events?since=` (live from GameDO, finished from R2)
-- `GET /api/games/:id/ws` (spectator WebSocket: server → client only)
+- `GET /api/games/:id/events?since=` (NDJSON, one event per line with `seq > since`;
+  live from GameDO, finished from R2)
+- `GET /api/games/:id/transcripts?seat=` (NDJSON `WakeTranscript`s; live from GameDO,
+  finished from R2 `seats/<seat>.jsonl`)
+- `GET /api/games/:id/ws` (spectator WebSocket: server → client only; messages `Hello`,
+  `Events`, `Activity`, `Status`, see `apps/worker/README.md`)
 
 Protected (`Authorization: Bearer <BENCH_API_KEY>`):
 
 - `POST /api/runs` — create and start a run (body = `RunConfig`)
-- `POST /api/runs/:id/cancel`
+- `POST /api/runs/:id/cancel` — returns `{ run: RunSummary }`
 
 Secrets (Alchemy, from env): `BENCH_API_KEY`, `OPENROUTER_API_KEY`.
 
 ### 7.3 Storage
 
 **D1** (via `@effect/sql-d1`), tables: `runs`, `games`, `seats`, `wakes`, `offers`,
-`auctions`, `ratings`, `rating_history`. One row per wake (`wakes`) holds kind, round,
-reasons, latency, tokens, cost, tool calls, invalid actions, timeout.
+`auctions`, `ratings`, `rating_history`, plus `rating_tables`/`rating_guard` for the
+optimistic concurrency of rating updates. One row per wake (`wakes`) holds kind, round,
+reasons, latency, tokens, cost, tool calls, invalid actions, timeout; per-seat usage is
+aggregated from it when read.
 
 **R2**: `games/<gameId>/events.jsonl`, `games/<gameId>/summary.json`,
 `games/<gameId>/seats/<seat>.jsonl` (full transcript with reasoning and notes).
@@ -507,8 +520,14 @@ RunConfig {
 }
 ```
 
+All rotations of one seed share the game seed (same dice and decks, competitors moved
+one seat along); seed `s` derives from `s` alone, so it is the same in every run. The
+budget gates LLM wakes only: games without LLM seats cost nothing and still run when
+the budget is spent.
+
 Ratings: OpenSkill (Plackett–Luce), one table per player count, ranks from final
-standings. Leaderboard score = `mu − 3σ`. Also shown: games, wins, average place,
+standings. Leaderboard score = `mu − 3σ`. A competitor holding several seats of one
+game is rated per seat from the same prior and gets the mean of the posteriors. Also shown: games, wins, average place,
 average net worth, invalid-action rate, timeout rate, cost per game, latency per wake.
 
 ---

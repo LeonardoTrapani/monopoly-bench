@@ -12,3 +12,6 @@ coverage/
 
 # local scratch scripts
 /.agent/
+
+# agent worktrees
+/.claude/worktrees/

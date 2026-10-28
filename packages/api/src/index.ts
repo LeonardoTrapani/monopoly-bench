@@ -326,7 +326,18 @@ export type SeatActivity = typeof SeatActivity.Type;
 
 /** Suggested models for the run form. Edit freely; ids are OpenRouter ids. */
 export const defaultModelCatalog: ReadonlyArray<ModelCatalogEntry> = [
+  // Checked against GET https://openrouter.ai/api/v1/models on 2026-10-28 (all support tools).
   { model: "anthropic/claude-opus-5.5", label: "Claude Opus 5.5", provider: "Anthropic" },
   { model: "anthropic/claude-sonnet-5.5", label: "Claude Sonnet 5.5", provider: "Anthropic" },
   { model: "anthropic/claude-haiku-5.5", label: "Claude Haiku 5.5", provider: "Anthropic" },
+  { model: "openai/gpt-6-astra", label: "GPT-6 Astra", provider: "OpenAI" },
+  { model: "openai/gpt-6.1-sol", label: "GPT-6.1 Sol", provider: "OpenAI" },
+  { model: "google/gemini-4-argon", label: "Gemini 4 Argon", provider: "Google" },
+  { model: "x-ai/grok-4.7", label: "Grok 4.7", provider: "xAI" },
+  { model: "deepseek/deepseek-v4-pro-0813", label: "DeepSeek V4 Pro", provider: "DeepSeek" },
+  { model: "qwen/qwen3.8-max-0902", label: "Qwen3.8 Max", provider: "Qwen" },
+  { model: "moonshotai/kimi-k3.1-pro", label: "Kimi K3.1 Pro", provider: "Moonshot AI" },
+  { model: "z-ai/glm-5.3", label: "GLM 5.3", provider: "Z.ai" },
+  { model: "mistralai/mistral-large-4-0", label: "Mistral Large 4", provider: "Mistral" },
+  { model: "minimax/minimax-m3", label: "MiniMax M3", provider: "MiniMax" },
 ];
