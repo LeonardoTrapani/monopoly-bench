@@ -4,7 +4,8 @@
  * only sent to OpenRouter; nothing here logs it or puts it in a message.
  */
 import { OPENROUTER_BASE_URL } from "@mb/agent";
-import { Option, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
+import * as HttpClient from "effect/http/HttpClient";
 
 export const OPENROUTER_KEY_URL = `${OPENROUTER_BASE_URL}/key`;
 
@@ -26,31 +27,38 @@ const KeyInfo = Schema.fromJsonString(
 
 const decodeKeyInfo = Schema.decodeUnknownOption(KeyInfo);
 
-export const checkOpenRouterKey = async (key: string, fetcher: typeof fetch): Promise<KeyCheck> => {
-  let response: Response;
+export const checkOpenRouterKey = (
+  key: string,
+): Effect.Effect<KeyCheck, never, HttpClient.HttpClient> =>
+  Effect.gen(function* () {
+    const client = yield* HttpClient.HttpClient;
 
-  try {
-    response = await fetcher(OPENROUTER_KEY_URL, {
-      headers: { authorization: `Bearer ${key}`, accept: "application/json" },
-    });
-  } catch {
-    return { status: "unavailable", reason: "OpenRouter could not be reached" };
-  }
+    const response = yield* client
+      .get(OPENROUTER_KEY_URL, {
+        headers: { authorization: `Bearer ${key}`, accept: "application/json" },
+      })
+      .pipe(Effect.option);
 
-  if (response.status === 401 || response.status === 403) return { status: "rejected" };
+    if (Option.isNone(response)) {
+      return { status: "unavailable", reason: "OpenRouter could not be reached" } as const;
+    }
 
-  if (!response.ok) {
-    return { status: "unavailable", reason: `OpenRouter answered ${response.status}` };
-  }
+    const { status } = response.value;
 
-  // A 200 means the key works; a body we cannot read only loses the limit.
-  const info = decodeKeyInfo(await response.text());
+    if (status === 401 || status === 403) return { status: "rejected" } as const;
 
-  return {
-    status: "valid",
-    limitRemainingUsd: Option.match(info, {
-      onSome: (body) => body.data.limit_remaining ?? null,
-      onNone: () => null,
-    }),
-  };
-};
+    if (status < 200 || status >= 300) {
+      return { status: "unavailable", reason: `OpenRouter answered ${status}` } as const;
+    }
+
+    // A 200 means the key works; a body we cannot read only loses the limit.
+    const info = decodeKeyInfo(yield* response.value.text.pipe(Effect.orElseSucceed(() => "")));
+
+    return {
+      status: "valid",
+      limitRemainingUsd: Option.match(info, {
+        onSome: (body) => body.data.limit_remaining ?? null,
+        onNone: () => null,
+      }),
+    } as const;
+  });

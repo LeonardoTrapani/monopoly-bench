@@ -1,8 +1,10 @@
 import { LlmSeat, type RunConfig } from "@mb/api";
+import { Effect } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { GameOutcome, GameStart, OwnKeyFunding } from "../contracts.ts";
 import type { GameRatingInput } from "../db/ratings-store.ts";
+import { noop, port, run } from "../testing/effect.ts";
 import { memorySqlPort } from "../testing/sqlite.ts";
 import { RunCoordinator } from "./run-coordinator.ts";
 
@@ -28,43 +30,43 @@ const setup = () => {
   const coordinator = new RunCoordinator({
     sql,
     db: {
-      insertRun: async () => {},
-      updateRun: async (_id, status, spent) => {
+      insertRun: noop,
+      updateRun: port((_id, status, spent) => {
         runUpdates.push(`${status}:${spent}`);
-      },
-      abortQueued: async (ids) => {
+      }),
+      abortQueued: port((ids) => {
         abortedQueued.push(...ids);
-      },
-      applyRatings: async (input) => {
+      }),
+      applyRatings: port((input) => {
         if (failRatings > 0) {
           failRatings -= 1;
           throw new Error("D1 unavailable");
         }
 
         rated.push(input);
-      },
+      }),
     },
     games: {
-      start: async (start) => {
+      start: port((start) => {
         if (failStarts > 0) {
           failStarts -= 1;
           throw new Error("GameDO unavailable");
         }
 
         started.push(start);
-      },
-      abort: async (gameId) => {
+      }),
+      abort: port((gameId) => {
         aborted.push(gameId);
-      },
-      purge: async (gameId, llmSeats) => {
+      }),
+      purge: port((gameId, llmSeats) => {
         purged.push(`${gameId}:${llmSeats.join("")}`);
-      },
+      }),
     },
-    setAlarm: async (at) => {
-      alarms.push(at);
-    },
+    setAlarm: (at) =>
+      Effect.sync(() => {
+        alarms.push(at);
+      }),
     now: () => Date.parse("2026-10-28T10:00:00.000Z"),
-    log: () => {},
   });
 
   const finish = (start: GameStart, status: GameOutcome["status"] = "finished"): GameOutcome => ({
@@ -113,14 +115,19 @@ describe("RunCoordinator", () => {
   it("starts up to `concurrency` games and the next one when a game finishes", async () => {
     const h = setup();
 
-    const summary = await h.coordinator.create(
-      "r1",
-      config({ maxRounds: 7, tableFrequency: "everyRound" }),
-      [
-        { id: "anthropic/claude-opus-5.5", pricing: { prompt: "0.000004", completion: "0.00002" } },
-        { id: "unused/model" },
-      ],
-      null,
+    const summary = await run(
+      h.coordinator.create(
+        "r1",
+        config({ maxRounds: 7, tableFrequency: "everyRound" }),
+        [
+          {
+            id: "anthropic/claude-opus-5.5",
+            pricing: { prompt: "0.000004", completion: "0.00002" },
+          },
+          { id: "unused/model" },
+        ],
+        null,
+      ),
     );
 
     expect(summary).toMatchObject({
@@ -147,8 +154,8 @@ describe("RunCoordinator", () => {
 
     if (first === undefined) throw new Error("not started");
 
-    await h.coordinator.gameFinished(h.finish(first));
-    await h.coordinator.gameFinished(h.finish(first));
+    await run(h.coordinator.gameFinished(h.finish(first)));
+    await run(h.coordinator.gameFinished(h.finish(first)));
 
     expect(h.started.map((start) => start.gameId)).toEqual(["r1-0-0", "r1-0-1", "r1-1-0"]);
     expect(h.rated.map((input) => input.gameId)).toEqual(["r1-0-0"]);
@@ -158,8 +165,8 @@ describe("RunCoordinator", () => {
   it("is idempotent on create", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config(), [], null);
-    const again = await h.coordinator.create("r1", config({ seeds: 9 }), [], null);
+    await run(h.coordinator.create("r1", config(), [], null));
+    const again = await run(h.coordinator.create("r1", config({ seeds: 9 }), [], null));
 
     expect(again?.gamesTotal).toBe(6);
     expect(h.started).toHaveLength(2);
@@ -168,10 +175,10 @@ describe("RunCoordinator", () => {
   it("finishes the run after the last game and does not rate aborted games", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config({ seeds: 1, concurrency: 4 }), [], null);
+    await run(h.coordinator.create("r1", config({ seeds: 1, concurrency: 4 }), [], null));
 
     for (const start of h.started.slice())
-      await h.coordinator.gameFinished(h.finish(start, "aborted"));
+      await run(h.coordinator.gameFinished(h.finish(start, "aborted")));
 
     expect(h.coordinator.summary()?.status).toBe("finished");
     expect(h.rated).toHaveLength(0);
@@ -181,13 +188,13 @@ describe("RunCoordinator", () => {
   it("charges each wake once and stops LLM games when the budget is reached", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config({ budgetUsd: 1 }), [], null);
+    await run(h.coordinator.create("r1", config({ budgetUsd: 1 }), [], null));
 
-    expect(await h.coordinator.charge("r1-0-0", "k1", 0.6)).toEqual({ exhausted: false });
-    expect(await h.coordinator.charge("r1-0-0", "k1", 0.6)).toEqual({ exhausted: false });
+    expect(await run(h.coordinator.charge("r1-0-0", "k1", 0.6))).toEqual({ exhausted: false });
+    expect(await run(h.coordinator.charge("r1-0-0", "k1", 0.6))).toEqual({ exhausted: false });
     expect(h.coordinator.summary()?.spentUsd).toBeCloseTo(0.6);
 
-    expect(await h.coordinator.charge("r1-0-0", "k2", 0.5)).toEqual({ exhausted: true });
+    expect(await run(h.coordinator.charge("r1-0-0", "k2", 0.5))).toEqual({ exhausted: true });
     expect(h.coordinator.summary()?.spentUsd).toBeCloseTo(1.1);
     // The charging game learns it from the answer; the other running LLM game is aborted.
     expect(h.aborted).toEqual(["r1-0-1"]);
@@ -196,7 +203,7 @@ describe("RunCoordinator", () => {
 
     if (first === undefined) throw new Error("not started");
 
-    await h.coordinator.gameFinished(h.finish(first, "aborted"));
+    await run(h.coordinator.gameFinished(h.finish(first, "aborted")));
 
     // Queued LLM games never start once the budget is spent.
     expect(h.started).toHaveLength(2);
@@ -206,9 +213,9 @@ describe("RunCoordinator", () => {
   it("cancels: queued games never start and running games are aborted", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config(), [], null);
+    await run(h.coordinator.create("r1", config(), [], null));
 
-    const summary = await h.coordinator.cancel();
+    const summary = await run(h.coordinator.cancel());
 
     expect(summary?.status).toBe("cancelled");
     expect(h.aborted).toEqual(["r1-0-0", "r1-0-1"]);
@@ -218,7 +225,7 @@ describe("RunCoordinator", () => {
 
     if (first === undefined) throw new Error("not started");
 
-    await h.coordinator.gameFinished(h.finish(first, "aborted"));
+    await run(h.coordinator.gameFinished(h.finish(first, "aborted")));
 
     expect(h.started).toHaveLength(2);
     expect(h.coordinator.summary()?.status).toBe("cancelled");
@@ -228,11 +235,11 @@ describe("RunCoordinator", () => {
     const h = setup();
     h.failNextStarts(1);
 
-    await h.coordinator.create("r1", config(), [], null);
+    await run(h.coordinator.create("r1", config(), [], null));
 
     expect(h.started.map((start) => start.gameId)).toEqual(["r1-0-1"]);
 
-    await h.coordinator.alarm();
+    await run(h.coordinator.alarm());
 
     expect(h.started.map((start) => start.gameId)).toEqual(["r1-0-1", "r1-0-0"]);
   });
@@ -240,16 +247,16 @@ describe("RunCoordinator", () => {
   it("keeps retrying a failed rating after the run finished (F3)", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config({ seeds: 1 }), [], null);
+    await run(h.coordinator.create("r1", config({ seeds: 1 }), [], null));
     h.failNextRatings(1);
 
-    for (const start of h.started.slice()) await h.coordinator.gameFinished(h.finish(start));
+    for (const start of h.started.slice()) await run(h.coordinator.gameFinished(h.finish(start)));
 
     expect(h.coordinator.summary()?.status).toBe("finished");
     expect(h.rated.map((input) => input.gameId)).toEqual(["r1-0-1"]);
     expect(h.alarms.at(-1)).not.toBeNull();
 
-    await h.coordinator.alarm();
+    await run(h.coordinator.alarm());
 
     expect(h.rated.map((input) => input.gameId).sort()).toEqual(["r1-0-0", "r1-0-1"]);
     expect(h.alarms.at(-1)).toBeNull();
@@ -258,7 +265,7 @@ describe("RunCoordinator", () => {
   it("keeps retrying a failed rating after the run was cancelled (F3)", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config({ seeds: 1 }), [], null);
+    await run(h.coordinator.create("r1", config({ seeds: 1 }), [], null));
     h.failNextRatings(1);
 
     const first = h.started[0];
@@ -266,12 +273,12 @@ describe("RunCoordinator", () => {
     if (first === undefined) throw new Error("not started");
 
     // A game that was already ending when the run was cancelled.
-    await h.coordinator.cancel();
-    await h.coordinator.gameFinished(h.finish(first));
+    await run(h.coordinator.cancel());
+    await run(h.coordinator.gameFinished(h.finish(first)));
 
     expect(h.alarms.at(-1)).not.toBeNull();
 
-    await h.coordinator.alarm();
+    await run(h.coordinator.alarm());
 
     expect(h.rated.map((input) => input.gameId)).toEqual(["r1-0-0"]);
   });
@@ -283,20 +290,19 @@ describe("RunCoordinator", () => {
     const coordinator = new RunCoordinator({
       sql: memorySqlPort(),
       db: {
-        insertRun: async (run) => {
+        insertRun: port((run) => {
           inserted.push(JSON.stringify(run));
-        },
-        updateRun: async () => {},
-        abortQueued: async () => {},
-        applyRatings: async () => {},
+        }),
+        updateRun: noop,
+        abortQueued: noop,
+        applyRatings: noop,
       },
-      games: { start: async () => {}, abort: async () => {}, purge: async () => {} },
-      setAlarm: async () => {},
+      games: { start: noop, abort: noop, purge: noop },
+      setAlarm: noop,
       now: () => 0,
-      log: () => {},
     });
 
-    const summary = await coordinator.create("r1", config({ seeds: 1 }), [], ownKey);
+    const summary = await run(coordinator.create("r1", config({ seeds: 1 }), [], ownKey));
 
     expect(summary.funding).toBe("ownKey");
     expect(inserted.join("")).toContain('"funding":"ownKey"');
@@ -308,7 +314,7 @@ describe("RunCoordinator", () => {
     expect(coordinator.cancelTokenMatches("ab12")).toBe(true);
     expect(coordinator.cancelTokenMatches("ab13")).toBe(false);
 
-    await coordinator.cancel();
+    await run(coordinator.cancel());
 
     // Cancelled: no key for any later wake (it fails fast instead of using the server's key).
     expect(coordinator.credentials()).toBeNull();
@@ -317,7 +323,7 @@ describe("RunCoordinator", () => {
     // A server-funded run: the server's key while active, nothing for an unknown run.
     expect(h.coordinator.credentials()).toBeNull();
 
-    await h.coordinator.create("r2", config({ seeds: 1 }), [], null);
+    await run(h.coordinator.create("r2", config({ seeds: 1 }), [], null));
 
     expect(h.coordinator.credentials()).toEqual({ funding: "server", openRouterKey: null });
     expect(h.coordinator.cancelTokenMatches("ab12")).toBe(false);
@@ -326,9 +332,9 @@ describe("RunCoordinator", () => {
   it("deletes the own key when the run finishes", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config({ seeds: 1 }), [], ownKey);
+    await run(h.coordinator.create("r1", config({ seeds: 1 }), [], ownKey));
 
-    for (const start of h.started.slice()) await h.coordinator.gameFinished(h.finish(start));
+    for (const start of h.started.slice()) await run(h.coordinator.gameFinished(h.finish(start)));
 
     expect(h.coordinator.summary()?.status).toBe("finished");
     expect(h.coordinator.credentials()).toBeNull();
@@ -338,8 +344,8 @@ describe("RunCoordinator", () => {
   it("purges a deleted run: started games and their LLM seats, then its own storage", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config(), [], ownKey);
-    await h.coordinator.purge();
+    await run(h.coordinator.create("r1", config(), [], ownKey));
+    await run(h.coordinator.purge());
 
     expect(h.purged).toEqual(["r1-0-0:AB", "r1-0-1:AB"]);
     expect(h.coordinator.summary()).toBeNull();
@@ -352,7 +358,7 @@ describe("RunCoordinator", () => {
     expect(h.alarms.at(-1)).toBeNull();
 
     // Idempotent: nothing left to purge.
-    await h.coordinator.purge();
+    await run(h.coordinator.purge());
 
     expect(h.purged).toHaveLength(2);
   });

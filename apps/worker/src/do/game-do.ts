@@ -1,144 +1,131 @@
 /**
- * GameDO: one per game, SQLite-backed. A thin adapter from the Cloudflare runtime to
+ * GameDO: one per game, SQLite-backed. A thin adapter from the Durable Object runtime to
  * `GameHost`; spectators connect with hibernatable WebSockets (server → client only).
  */
-import { DurableObject } from "cloudflare:workers";
-import type { Seat, SeatActivity } from "@mb/api";
+import * as Cloudflare from "@alchemy.run/cloudflare";
+import { RuntimeContext } from "alchemy/RuntimeContext";
+import { Effect, Layer } from "effect";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 
-import type { WorkerEnv } from "../../alchemy.run.ts";
-import type { GameStart, SeatCall, SeatCallResult, WakeReport } from "../contracts.ts";
 import { finishGame, gameProgress, markGameRunning, recordWake } from "../db/writes.ts";
-import type { Command, GameEvent, GameState } from "@mb/engine";
-
+import { upstream } from "../errors.ts";
 import { engineBinding } from "../game/engine-binding.ts";
 import { GameHost } from "../game/game-host.ts";
-import { durableAlarm, durableSql, logError, runD1 } from "./runtime.ts";
+import { Archive, Database } from "../resources.ts";
+import { type GameObject, objects } from "./objects.ts";
+import { durableAlarm, durableSql, runD1 } from "./runtime.ts";
 
-export class GameDO extends DurableObject<WorkerEnv> {
-  private readonly host: GameHost<GameState, GameEvent, Command>;
+export class GameDO extends Cloudflare.DurableObject<GameDO>()(
+  "GameDO",
+  Effect.gen(function* () {
+    const state = yield* Cloudflare.DurableObjectState;
+    const { player, run } = yield* objects;
+    const database = yield* Cloudflare.D1.QueryDatabase(Database);
+    const archive = yield* Cloudflare.R2.ReadWriteBucket(Archive);
 
-  constructor(ctx: DurableObjectState, env: WorkerEnv) {
-    super(ctx, env);
-    this.host = new GameHost(
-      {
-        sql: durableSql(ctx.storage),
-        db: {
-          markRunning: (gameId, at) => runD1(env.DB, markGameRunning(gameId, at)),
-          progress: (gameId, turn, round, at) =>
-            runD1(env.DB, gameProgress(gameId, turn, round, at)),
-          recordWake: (row) => runD1(env.DB, recordWake(row)),
-          finish: (game) => runD1(env.DB, finishGame(game)),
-        },
-        archive: {
-          put: async (key, body, contentType) => {
-            await env.ARCHIVE.put(key, body, { httpMetadata: { contentType } });
+    return Effect.gen(function* () {
+      const d1 = runD1(yield* database.raw);
+      const runtime = yield* RuntimeContext;
+      const { storage } = state.raw;
+
+      const host = new GameHost(
+        {
+          sql: durableSql(storage),
+          db: {
+            markRunning: (gameId, at) =>
+              d1(markGameRunning(gameId, at)).pipe(upstream("D1 markRunning")),
+            progress: (gameId, turn, round, at) =>
+              d1(gameProgress(gameId, turn, round, at)).pipe(upstream("D1 progress")),
+            recordWake: (row) => d1(recordWake(row)).pipe(upstream("D1 recordWake")),
+            finish: (game) => d1(finishGame(game)).pipe(upstream("D1 finish")),
           },
-        },
-        players: {
-          wake: (request) =>
-            env.PLAYERS.getByName(`${request.gameId}:${request.seat}`).wake(request),
-        },
-        run: {
-          charge: (runId, gameId, key, costUsd) =>
-            env.RUNS.getByName(runId).charge(gameId, key, costUsd),
-          gameFinished: (runId, outcome) => env.RUNS.getByName(runId).gameFinished(outcome),
-        },
-        broadcast: (message) => {
-          for (const socket of ctx.getWebSockets()) {
-            try {
-              socket.send(message);
-            } catch (cause) {
-              logError("spectator send failed", cause);
+          archive: {
+            put: (key, body, contentType) =>
+              archive
+                .put(key, body, { httpMetadata: { contentType } })
+                .pipe(
+                  Effect.asVoid,
+                  Effect.provideService(RuntimeContext, runtime),
+                  upstream(`R2 put ${key}`),
+                ),
+          },
+          players: {
+            wake: (request) =>
+              player(request.gameId, request.seat).wake(request).pipe(upstream("PlayerDO wake")),
+          },
+          run: {
+            charge: (runId, gameId, key, costUsd) =>
+              run(runId).charge(gameId, key, costUsd).pipe(upstream("RunDO charge")),
+            gameFinished: (runId, outcome) =>
+              run(runId).gameFinished(outcome).pipe(upstream("RunDO gameFinished")),
+          },
+          broadcast: (message) => {
+            for (const socket of state.raw.getWebSockets()) {
+              try {
+                socket.send(message);
+              } catch {
+                // A socket closing under us: its close handler cleans it up.
+              }
             }
-          }
+          },
+          setAlarm: durableAlarm(storage),
+          now: Date.now,
         },
-        setAlarm: durableAlarm(ctx.storage),
-        now: Date.now,
-        log: logError,
-      },
-      engineBinding,
-    );
-  }
+        engineBinding,
+      );
 
-  start(input: GameStart): Promise<void> {
-    return this.host.start(input);
-  }
+      const surface: GameObject = {
+        start: (input) => host.start(input),
+        submit: (call) => host.submit(call),
+        done: (call) => host.done(call),
+        inspect: (call) => host.inspect(call),
+        wakeFinished: (report) => host.wakeFinished(report),
+        activity: (activity) => Effect.sync(() => host.activity(activity)),
+        abort: (reason) => host.abort(reason),
+        budgetExhausted: () => host.budgetExhausted(),
+        /** RunDO → GameDO when the run is deleted: forget the game and close spectator sockets. */
+        purge: () =>
+          host.purge().pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                for (const socket of state.raw.getWebSockets()) socket.close(1000, "game deleted");
+              }),
+            ),
+          ),
+        events: (since) => Effect.sync(() => host.eventsSince(since)),
+        transcripts: (seat) => Effect.sync(() => host.transcripts(seat)),
+        config: () => Effect.sync(() => host.config()),
+      };
 
-  submit(call: SeatCall): Promise<SeatCallResult> {
-    return this.host.submit(call);
-  }
+      return {
+        ...surface,
+        alarm: () => host.alarm(),
+        /** Spectator WebSocket upgrade, forwarded by the Worker from `GET /api/games/:id/ws`. */
+        fetch: Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
 
-  done(call: SeatCall): Promise<SeatCallResult> {
-    return this.host.done(call);
-  }
+          if (request.headers.upgrade?.toLowerCase() !== "websocket") {
+            return HttpServerResponse.text("Expected a WebSocket upgrade", { status: 426 });
+          }
 
-  inspect(call: SeatCall): Promise<SeatCallResult> {
-    return this.host.inspect(call);
-  }
+          // The Worker forwards `/api/games/<id>/ws`; the id names a game that has not started yet.
+          const gameId = decodeURIComponent(request.url.split("?")[0]?.split("/")[3] ?? "");
+          const [response, socket] = yield* Cloudflare.upgrade();
 
-  wakeFinished(report: WakeReport): Promise<void> {
-    return this.host.wakeFinished(report);
-  }
+          yield* socket.send(host.helloMessage(gameId));
 
-  activity(activity: SeatActivity): void {
-    this.host.activity(activity);
-  }
-
-  abort(reason: string): Promise<void> {
-    return this.host.abort(reason);
-  }
-
-  budgetExhausted(): Promise<void> {
-    return this.host.budgetExhausted();
-  }
-
-  /** RunDO → GameDO when the run is deleted: forget the game and close spectator sockets. */
-  async purge(): Promise<void> {
-    await this.host.purge();
-
-    for (const socket of this.ctx.getWebSockets()) socket.close(1000, "game deleted");
-  }
-
-  events(since: number): string {
-    return this.host.eventsSince(since);
-  }
-
-  transcripts(seat: Seat | null): string {
-    return this.host.transcripts(seat);
-  }
-
-  config(): string | null {
-    return this.host.config();
-  }
-
-  override alarm(): Promise<void> {
-    return this.host.alarm();
-  }
-
-  /** Spectator WebSocket upgrade, forwarded by the Worker from `GET /api/games/:id/ws`. */
-  override async fetch(request: Request): Promise<Response> {
-    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-      return new Response("Expected a WebSocket upgrade", { status: 426 });
-    }
-
-    const [client, server] = Object.values(new WebSocketPair());
-
-    if (client === undefined || server === undefined)
-      return new Response("WebSocket failed", { status: 500 });
-
-    // The Worker forwards `/api/games/<id>/ws`; the id names a game that has not started yet.
-    const gameId = decodeURIComponent(new URL(request.url).pathname.split("/")[3] ?? "");
-
-    this.ctx.acceptWebSocket(server);
-    server.send(this.host.helloMessage(gameId));
-
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  /** Spectators only listen; anything they send is ignored. */
-  override webSocketMessage(): void {}
-
-  override webSocketClose(socket: WebSocket, code: number): void {
-    socket.close(code === 1005 ? 1000 : code, "closing");
-  }
-}
+          return response;
+        }),
+        /** Spectators only listen; anything they send is ignored. */
+        webSocketMessage: () => Effect.void,
+        webSocketClose: (socket: Cloudflare.WebSocket, code: number) =>
+          socket.close(code === 1005 ? 1000 : code, "closing"),
+      };
+    });
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(Cloudflare.D1.QueryDatabaseBinding, Cloudflare.R2.ReadWriteBucketBinding),
+    ),
+  ),
+) {}

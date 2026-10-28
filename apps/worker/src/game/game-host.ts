@@ -7,7 +7,7 @@
  */
 import { isCommandTool, isToolArgs } from "@mb/agent";
 import { GameStatus, type LlmSeat, Seat, type SeatActivity, WakeTranscript } from "@mb/api";
-import { Match, Result, Schema } from "effect";
+import { Deferred, Effect, Match, Result, Schema } from "effect";
 
 import {
   type ChargeResult,
@@ -22,6 +22,7 @@ import {
   type WakeRequest,
 } from "../contracts.ts";
 import type { FinishedGame, WakeRow } from "../db/writes.ts";
+import type { UpstreamError } from "../errors.ts";
 import { jsonColumn, queryFirst, queryRows, type SqlPort } from "../sql.ts";
 import type { EngineBinding, EngineEvent, Json, PendingDecision } from "./engine.ts";
 
@@ -54,18 +55,27 @@ const modelErrorOf = (text: string): string => {
 };
 
 export interface GameDbPort {
-  readonly markRunning: (gameId: string, at: string) => Promise<void>;
-  readonly progress: (gameId: string, turn: number, round: number, at: string) => Promise<void>;
-  readonly recordWake: (row: WakeRow) => Promise<void>;
-  readonly finish: (game: FinishedGame) => Promise<void>;
+  readonly markRunning: (gameId: string, at: string) => Effect.Effect<void, UpstreamError>;
+  readonly progress: (
+    gameId: string,
+    turn: number,
+    round: number,
+    at: string,
+  ) => Effect.Effect<void, UpstreamError>;
+  readonly recordWake: (row: WakeRow) => Effect.Effect<void, UpstreamError>;
+  readonly finish: (game: FinishedGame) => Effect.Effect<void, UpstreamError>;
 }
 
 export interface ArchivePort {
-  readonly put: (key: string, body: string, contentType: string) => Promise<void>;
+  readonly put: (
+    key: string,
+    body: string,
+    contentType: string,
+  ) => Effect.Effect<void, UpstreamError>;
 }
 
 export interface PlayersPort {
-  readonly wake: (request: WakeRequest) => Promise<void>;
+  readonly wake: (request: WakeRequest) => Effect.Effect<void, UpstreamError>;
 }
 
 export interface RunLinkPort {
@@ -74,8 +84,11 @@ export interface RunLinkPort {
     gameId: string,
     key: string,
     costUsd: number,
-  ) => Promise<ChargeResult>;
-  readonly gameFinished: (runId: string, outcome: GameOutcome) => Promise<void>;
+  ) => Effect.Effect<ChargeResult, UpstreamError>;
+  readonly gameFinished: (
+    runId: string,
+    outcome: GameOutcome,
+  ) => Effect.Effect<void, UpstreamError>;
 }
 
 export interface GameHostPorts {
@@ -86,9 +99,8 @@ export interface GameHostPorts {
   readonly run: RunLinkPort;
   readonly broadcast: (message: string) => void;
   /** Replace the object's single alarm; `null` clears it. */
-  readonly setAlarm: (at: number | null) => Promise<void>;
+  readonly setAlarm: (at: number | null) => Effect.Effect<void>;
   readonly now: () => number;
-  readonly log: (message: string, cause?: unknown) => void;
   /** Bot moves per invocation (default `MAX_STEPS_PER_SETTLE`). */
   readonly stepsPerAlarm?: number;
 }
@@ -203,7 +215,7 @@ export class GameHost<S, E extends EngineEvent, C> {
   /** The game was deleted: work still in flight must not write anything more. */
   private purged = false;
   /** R2 writes in flight: purge waits for them, so none lands after the archive is deleted. */
-  private readonly archiveWrites = new Set<Promise<void>>();
+  private readonly archiveWrites = new Set<Deferred.Deferred<void>>();
 
   constructor(
     private readonly ports: GameHostPorts,
@@ -242,132 +254,139 @@ export class GameHost<S, E extends EngineEvent, C> {
   }
 
   /** RunDO → GameDO. Idempotent: a second start of the same game is ignored. */
-  async start(input: GameStart): Promise<void> {
-    if (this.game !== undefined) return;
+  start(input: GameStart): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      if (this.game !== undefined) return;
 
-    const created = this.binding.engine.newGame(input.config);
+      const created = this.binding.engine.newGame(input.config);
 
-    this.ports.sql.transaction(() => {
-      this.setMeta("start", encodeStart(input));
-      this.setMeta("status", "running");
-      this.setMeta("budgetExhausted", input.budgetExhausted ? "1" : "0");
-      this.persistEvents(created.events);
-      this.writeSnapshot(created.state);
+      this.ports.sql.transaction(() => {
+        this.setMeta("start", encodeStart(input));
+        this.setMeta("status", "running");
+        this.setMeta("budgetExhausted", input.budgetExhausted ? "1" : "0");
+        this.persistEvents(created.events);
+        this.writeSnapshot(created.state);
+      });
+      this.game = input;
+      this.state = created.state;
+      this.broadcastEvents(created.events);
+
+      yield* this.ports.db
+        .markRunning(input.gameId, this.iso())
+        .pipe(
+          Effect.catch((cause) =>
+            Effect.logError(`D1 markRunning failed for ${input.gameId}`, cause),
+          ),
+        );
+
+      yield* this.kick();
     });
-    this.game = input;
-    this.state = created.state;
-    this.broadcastEvents(created.events);
-
-    try {
-      await this.ports.db.markRunning(input.gameId, this.iso());
-    } catch (cause) {
-      this.ports.log(`D1 markRunning failed for ${input.gameId}`, cause);
-    }
-
-    await this.kick();
   }
 
   /** PlayerDO → GameDO for every tool except `done` and `inspect`. */
-  async submit(call: SeatCall): Promise<SeatCallResult> {
+  submit(call: SeatCall): Effect.Effect<SeatCallResult> {
     return this.handleCall(call);
   }
 
-  async done(call: SeatCall): Promise<SeatCallResult> {
+  done(call: SeatCall): Effect.Effect<SeatCallResult> {
     return this.handleCall({ ...call, tool: "done", args: {} });
   }
 
-  async inspect(call: SeatCall): Promise<SeatCallResult> {
+  inspect(call: SeatCall): Effect.Effect<SeatCallResult> {
     return this.handleCall({ ...call, tool: "inspect" });
   }
 
   /** PlayerDO → GameDO when a wake ends. Idempotent per (seat, decisionId). */
-  async wakeFinished(report: WakeReport): Promise<void> {
-    const game = this.game;
+  wakeFinished(report: WakeReport): Effect.Effect<void, UpstreamError> {
+    return Effect.gen({ self: this }, function* () {
+      const game = this.game;
 
-    if (game === undefined) return;
+      if (game === undefined) return;
 
-    // Done only once the last step below ran: a report retried after a crash half-way through
-    // redoes the missing steps, all of which are idempotent.
-    const processed = queryFirst(
-      this.ports.sql,
-      StatusRow,
-      "SELECT status FROM decisions WHERE seat = ? AND decision_id = ?",
-      report.seat,
-      report.decisionId,
-    );
-
-    if (processed?.status === "reported") return;
-
-    this.ports.sql.exec(
-      "INSERT OR IGNORE INTO transcripts (seat, decision_id, at, json) VALUES (?, ?, ?, ?)",
-      report.seat,
-      report.decisionId,
-      this.ports.now(),
-      encodeTranscript(report.transcript),
-    );
-
-    const { transcript } = report;
-
-    // Accounting must succeed before the report counts as processed: a failure throws, the
-    // decision stays unreported and PlayerDO retries the report (both writes are idempotent).
-    await this.ports.db.recordWake({
-      gameId: game.gameId,
-      seat: report.seat,
-      decisionId: report.decisionId,
-      competitorId: this.seatOf(report.seat)?.competitorId ?? report.seat,
-      turn: transcript.turn,
-      kind: transcript.frame,
-      round: transcript.round,
-      reasons: transcript.reasons,
-      startedAt: transcript.startedAt,
-      latencyMs: report.latencyMs,
-      inputTokens: transcript.usage.inputTokens,
-      outputTokens: transcript.usage.outputTokens,
-      reasoningTokens: transcript.usage.reasoningTokens,
-      costUsd: transcript.usage.costUsd,
-      toolCalls: transcript.toolCalls.length,
-      invalidActions: transcript.invalidActions,
-      // A report arriving after GameDO's deadline is a timeout too.
-      timedOut: transcript.timedOut || processed?.status === "expired",
-      endReason: report.endReason,
-      compactions: report.compactions,
-    });
-
-    const charged = await this.ports.run.charge(
-      game.runId,
-      game.gameId,
-      `${game.gameId}:${report.seat}:${report.decisionId}`,
-      transcript.usage.costUsd,
-    );
-
-    if (this.purged) return;
-
-    if (charged.exhausted) this.setMeta("budgetExhausted", "1");
-
-    const modelErrors = this.modelErrorStreak(report);
-
-    if (modelErrors >= MAX_CONSECUTIVE_MODEL_ERRORS && this.status() === "running") {
-      const label = this.seatOf(report.seat)?.label ?? report.seat;
-
-      this.abortGame(
-        `${label}'s model failed ${modelErrors} wakes in a row: ${modelErrorOf(transcript.text)}`,
+      // Done only once the last step below ran: a report retried after a crash half-way through
+      // redoes the missing steps, all of which are idempotent.
+      const processed = queryFirst(
+        this.ports.sql,
+        StatusRow,
+        "SELECT status FROM decisions WHERE seat = ? AND decision_id = ?",
+        report.seat,
+        report.decisionId,
       );
-    }
 
-    // Once the game stopped, its archive may already hold this seat's transcripts (the last
-    // wake often reports after the game ends): refresh it once the game is archived.
-    if (this.status() !== "running") {
-      this.ports.sql.exec("INSERT OR IGNORE INTO stale_archives (seat) VALUES (?)", report.seat);
-    }
+      if (processed?.status === "reported") return;
 
-    // The wake ended without answering: apply the default now instead of at the deadline.
-    this.timeoutIfAwaited(report.seat, report.decisionId);
-    this.ports.sql.exec(
-      "UPDATE decisions SET status = 'reported' WHERE seat = ? AND decision_id = ?",
-      report.seat,
-      report.decisionId,
-    );
-    await this.kick();
+      this.ports.sql.exec(
+        "INSERT OR IGNORE INTO transcripts (seat, decision_id, at, json) VALUES (?, ?, ?, ?)",
+        report.seat,
+        report.decisionId,
+        this.ports.now(),
+        encodeTranscript(report.transcript),
+      );
+
+      const { transcript } = report;
+
+      // Accounting must succeed before the report counts as processed: a failure fails the
+      // call, the decision stays unreported and PlayerDO retries the report (both writes are
+      // idempotent).
+      yield* this.ports.db.recordWake({
+        gameId: game.gameId,
+        seat: report.seat,
+        decisionId: report.decisionId,
+        competitorId: this.seatOf(report.seat)?.competitorId ?? report.seat,
+        turn: transcript.turn,
+        kind: transcript.frame,
+        round: transcript.round,
+        reasons: transcript.reasons,
+        startedAt: transcript.startedAt,
+        latencyMs: report.latencyMs,
+        inputTokens: transcript.usage.inputTokens,
+        outputTokens: transcript.usage.outputTokens,
+        reasoningTokens: transcript.usage.reasoningTokens,
+        costUsd: transcript.usage.costUsd,
+        toolCalls: transcript.toolCalls.length,
+        invalidActions: transcript.invalidActions,
+        // A report arriving after GameDO's deadline is a timeout too.
+        timedOut: transcript.timedOut || processed?.status === "expired",
+        endReason: report.endReason,
+        compactions: report.compactions,
+      });
+
+      const charged = yield* this.ports.run.charge(
+        game.runId,
+        game.gameId,
+        `${game.gameId}:${report.seat}:${report.decisionId}`,
+        transcript.usage.costUsd,
+      );
+
+      if (this.purged) return;
+
+      if (charged.exhausted) this.setMeta("budgetExhausted", "1");
+
+      const modelErrors = this.modelErrorStreak(report);
+
+      if (modelErrors >= MAX_CONSECUTIVE_MODEL_ERRORS && this.status() === "running") {
+        const label = this.seatOf(report.seat)?.label ?? report.seat;
+
+        this.abortGame(
+          `${label}'s model failed ${modelErrors} wakes in a row: ${modelErrorOf(transcript.text)}`,
+        );
+      }
+
+      // Once the game stopped, its archive may already hold this seat's transcripts (the last
+      // wake often reports after the game ends): refresh it once the game is archived.
+      if (this.status() !== "running") {
+        this.ports.sql.exec("INSERT OR IGNORE INTO stale_archives (seat) VALUES (?)", report.seat);
+      }
+
+      // The wake ended without answering: apply the default now instead of at the deadline.
+      this.timeoutIfAwaited(report.seat, report.decisionId);
+      this.ports.sql.exec(
+        "UPDATE decisions SET status = 'reported' WHERE seat = ? AND decision_id = ?",
+        report.seat,
+        report.decisionId,
+      );
+      yield* this.kick();
+    });
   }
 
   /** PlayerDO → GameDO: live reasoning and tool calls for spectators (not stored). */
@@ -378,17 +397,21 @@ export class GameHost<S, E extends EngineEvent, C> {
   }
 
   /** RunDO → GameDO: the run's budget is spent; the next LLM wake aborts the game. */
-  async budgetExhausted(): Promise<void> {
-    this.setMeta("budgetExhausted", "1");
-    await this.kick();
+  budgetExhausted(): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      this.setMeta("budgetExhausted", "1");
+      yield* this.kick();
+    });
   }
 
   /** RunDO → GameDO (cancel, budget): end the game now. */
-  async abort(reason: string): Promise<void> {
-    if (this.status() !== "running") return;
+  abort(reason: string): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      if (this.status() !== "running") return;
 
-    this.abortGame(reason);
-    await this.kick();
+      this.abortGame(reason);
+      yield* this.kick();
+    });
   }
 
   /**
@@ -396,23 +419,27 @@ export class GameHost<S, E extends EngineEvent, C> {
    * forgotten: later calls find no game, and work already in flight stops before its next write
    * (no archive, no D1 summary, no run notification).
    */
-  async purge(): Promise<void> {
-    this.purged = true;
-    this.ports.sql.transaction(() => {
-      for (const table of TABLES) this.ports.sql.exec(`DELETE FROM ${table}`);
+  purge(): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      this.purged = true;
+      this.ports.sql.transaction(() => {
+        for (const table of TABLES) this.ports.sql.exec(`DELETE FROM ${table}`);
+      });
+      this.game = undefined;
+      this.state = undefined;
+      this.finishPending = false;
+      yield* this.ports.setAlarm(null);
+      yield* Effect.forEach([...this.archiveWrites], Deferred.await, { discard: true });
     });
-    this.game = undefined;
-    this.state = undefined;
-    this.finishPending = false;
-    await this.ports.setAlarm(null);
-    await Promise.allSettled(this.archiveWrites);
   }
 
-  async alarm(): Promise<void> {
-    if (this.game === undefined || this.state === undefined) return;
+  alarm(): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      if (this.game === undefined || this.state === undefined) return;
 
-    await this.expireDeadlines();
-    await this.settle();
+      yield* this.expireDeadlines();
+      yield* this.settle();
+    });
   }
 
   /** Events with `seq > since`, one JSON value per line (the `events.jsonl` format). */
@@ -465,30 +492,32 @@ export class GameHost<S, E extends EngineEvent, C> {
 
   // ── tool calls ─────────────────────────────────────────────────────────────────────────
 
-  private async handleCall(call: SeatCall): Promise<SeatCallResult> {
-    const cached = queryFirst(
-      this.ports.sql,
-      JsonRow,
-      "SELECT json FROM calls WHERE seat = ? AND decision_id = ? AND call_id = ?",
-      call.seat,
-      call.decisionId,
-      call.callId,
-    );
-
-    if (cached !== undefined) return decodeCallResult(cached.json);
-
-    const result = this.executeCall(call);
-
-    if (result.terminal && result.ok) {
-      this.ports.sql.exec(
-        "UPDATE decisions SET status = 'answered' WHERE seat = ? AND decision_id = ?",
+  private handleCall(call: SeatCall): Effect.Effect<SeatCallResult> {
+    return Effect.gen({ self: this }, function* () {
+      const cached = queryFirst(
+        this.ports.sql,
+        JsonRow,
+        "SELECT json FROM calls WHERE seat = ? AND decision_id = ? AND call_id = ?",
         call.seat,
         call.decisionId,
+        call.callId,
       );
-      await this.kick();
-    }
 
-    return result;
+      if (cached !== undefined) return decodeCallResult(cached.json);
+
+      const result = this.executeCall(call);
+
+      if (result.terminal && result.ok) {
+        this.ports.sql.exec(
+          "UPDATE decisions SET status = 'answered' WHERE seat = ? AND decision_id = ?",
+          call.seat,
+          call.decisionId,
+        );
+        yield* this.kick();
+      }
+
+      return result;
+    });
   }
 
   /** Synchronous: the state read, the engine call and the writes happen without interleaving. */
@@ -675,74 +704,80 @@ export class GameHost<S, E extends EngineEvent, C> {
    * Decisions past their deadline: apply the default and record a timed-out wake, so a wake
    * that never reports still counts (a late report replaces the row with its real usage).
    */
-  private async expireDeadlines(): Promise<void> {
-    const game = this.game;
+  private expireDeadlines(): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      const game = this.game;
 
-    if (game === undefined) return;
+      if (game === undefined) return;
 
-    const due = queryRows(
-      this.ports.sql,
-      DeadlineRow,
-      "SELECT seat, decision_id, deadline, dispatched_at, turn, frame, round, reasons FROM decisions WHERE status = 'dispatched' AND deadline <= ?",
-      this.ports.now(),
-    );
-
-    for (const row of due) {
-      const seat = this.seatOf(row.seat);
-
-      if (seat === undefined) continue;
-
-      this.timeoutIfAwaited(seat.seat, row.decision_id);
-      this.ports.sql.exec(
-        "UPDATE decisions SET status = 'expired' WHERE seat = ? AND decision_id = ?",
-        row.seat,
-        row.decision_id,
+      const due = queryRows(
+        this.ports.sql,
+        DeadlineRow,
+        "SELECT seat, decision_id, deadline, dispatched_at, turn, frame, round, reasons FROM decisions WHERE status = 'dispatched' AND deadline <= ?",
+        this.ports.now(),
       );
-      await this.recordWake({
-        gameId: game.gameId,
-        seat: seat.seat,
-        decisionId: row.decision_id,
-        competitorId: seat.competitorId,
-        turn: row.turn,
-        kind: row.frame,
-        round: row.round,
-        reasons: row.reasons,
-        startedAt: new Date(row.dispatched_at).toISOString(),
-        latencyMs: this.ports.now() - row.dispatched_at,
-        inputTokens: 0,
-        outputTokens: 0,
-        reasoningTokens: 0,
-        costUsd: 0,
-        toolCalls: 0,
-        invalidActions: 0,
-        timedOut: true,
-        endReason: "noReport",
-        compactions: 0,
-      });
-    }
+
+      for (const row of due) {
+        const seat = this.seatOf(row.seat);
+
+        if (seat === undefined) continue;
+
+        this.timeoutIfAwaited(seat.seat, row.decision_id);
+        this.ports.sql.exec(
+          "UPDATE decisions SET status = 'expired' WHERE seat = ? AND decision_id = ?",
+          row.seat,
+          row.decision_id,
+        );
+        yield* this.recordWake({
+          gameId: game.gameId,
+          seat: seat.seat,
+          decisionId: row.decision_id,
+          competitorId: seat.competitorId,
+          turn: row.turn,
+          kind: row.frame,
+          round: row.round,
+          reasons: row.reasons,
+          startedAt: new Date(row.dispatched_at).toISOString(),
+          latencyMs: this.ports.now() - row.dispatched_at,
+          inputTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          costUsd: 0,
+          toolCalls: 0,
+          invalidActions: 0,
+          timedOut: true,
+          endReason: "noReport",
+          compactions: 0,
+        });
+      }
+    });
   }
 
-  private async recordWake(row: WakeRow): Promise<void> {
-    try {
-      await this.ports.db.recordWake(row);
-    } catch (cause) {
-      this.ports.log(`D1 recordWake failed for ${row.gameId}/${row.seat}`, cause);
-    }
+  private recordWake(row: WakeRow): Effect.Effect<void> {
+    return this.ports.db
+      .recordWake(row)
+      .pipe(
+        Effect.catch((cause) =>
+          Effect.logError(`D1 recordWake failed for ${row.gameId}/${row.seat}`, cause),
+        ),
+      );
   }
 
   // ── the settle loop ───────────────────────────────────────────────────────────────────
 
   /** Re-run the settle loop soon: inline if one is running, otherwise through the alarm. */
-  private async kick(): Promise<void> {
-    if (this.purged) return;
+  private kick(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      if (this.purged) return Effect.void;
 
-    if (this.settling) {
-      this.dirty = true;
+      if (this.settling) {
+        this.dirty = true;
 
-      return;
-    }
+        return Effect.void;
+      }
 
-    await this.ports.setAlarm(this.ports.now());
+      return this.ports.setAlarm(this.ports.now());
+    });
   }
 
   /**
@@ -750,75 +785,93 @@ export class GameHost<S, E extends EngineEvent, C> {
    * LLM seats, finish the game when it ends. Never runs twice at once; calls that arrive
    * while it awaits mark it dirty and it loops again.
    */
-  private async settle(): Promise<void> {
-    if (this.settling) {
-      this.dirty = true;
-
-      return;
-    }
-
-    this.settling = true;
-
-    try {
-      do {
-        this.dirty = false;
-        this.continueLater = false;
-        await this.settleOnce();
-      } while (this.dirty && !this.continueLater);
-
-      this.flushSnapshot();
-      await this.flushProgress();
-    } finally {
-      this.settling = false;
-    }
-
-    await this.armAlarm();
-  }
-
-  private async settleOnce(): Promise<void> {
-    let steps = 0;
-
-    while (this.game !== undefined && this.state !== undefined) {
-      if (this.finishPending || this.status() !== "running") {
-        this.flushSnapshot();
-        await this.finish();
-        await this.refreshStaleArchives();
+  private settle(): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      if (this.settling) {
+        this.dirty = true;
 
         return;
       }
 
-      const state = this.state;
-      const pending = this.binding.engine.pending(state).decisions;
-      const botDecision = pending.find((decision) => this.seatOf(decision.seat)?.kind === "bot");
+      this.settling = true;
 
-      if (botDecision !== undefined) {
-        if (steps >= (this.ports.stepsPerAlarm ?? MAX_STEPS_PER_SETTLE)) {
-          this.continueLater = true;
+      yield* Effect.gen({ self: this }, function* () {
+        do {
+          this.dirty = false;
+          this.continueLater = false;
+          yield* this.settleOnce();
+        } while (this.dirty && !this.continueLater);
+
+        this.flushSnapshot();
+        yield* this.flushProgress();
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            this.settling = false;
+          }),
+        ),
+      );
+
+      yield* this.armAlarm();
+    });
+  }
+
+  private settleOnce(): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      let steps = 0;
+
+      while (this.game !== undefined && this.state !== undefined) {
+        if (this.finishPending || this.status() !== "running") {
+          this.flushSnapshot();
+          yield* this.finish();
+          yield* this.refreshStaleArchives();
 
           return;
         }
 
-        steps += 1;
-        this.playBot(state, botDecision);
-        continue;
+        const state = this.state;
+        const pending = this.binding.engine.pending(state).decisions;
+        const botDecision = pending.find((decision) => this.seatOf(decision.seat)?.kind === "bot");
+
+        if (botDecision !== undefined) {
+          if (steps >= (this.ports.stepsPerAlarm ?? MAX_STEPS_PER_SETTLE)) {
+            this.continueLater = true;
+
+            return;
+          }
+
+          steps += 1;
+
+          if (!this.playBot(state, botDecision)) {
+            yield* Effect.logError(
+              `Default refused for ${botDecision.seat} ${botDecision.decisionId}`,
+            );
+            this.abortGame("engine refused the default action");
+          }
+
+          continue;
+        }
+
+        this.flushSnapshot();
+
+        for (const decision of pending) {
+          if (this.status() !== "running") break;
+
+          yield* this.dispatch(decision);
+        }
+
+        if (this.finishPending) continue;
+
+        return;
       }
-
-      this.flushSnapshot();
-
-      for (const decision of pending) {
-        if (this.status() !== "running") break;
-
-        await this.dispatch(decision);
-      }
-
-      if (this.finishPending) continue;
-
-      return;
-    }
+    });
   }
 
-  /** One bot wake: its commands in order, within the per-wake limits, then the default if needed. */
-  private playBot(state: S, decision: PendingDecision): void {
+  /**
+   * One bot wake: its commands in order, within the per-wake limits, then the default if needed.
+   * False when the engine refused the default, which leaves the decision open.
+   */
+  private playBot(state: S, decision: PendingDecision): boolean {
     const { engine, seats } = this.binding;
     const seat = this.seatOf(decision.seat);
 
@@ -851,70 +904,74 @@ export class GameHost<S, E extends EngineEvent, C> {
     const after = this.state;
 
     if (after === undefined || !engine.isAwaiting(after, decision.seat, decision.decisionId)) {
-      return;
+      return true;
     }
 
     // A bot leaving its decision open must not stall the game: take the default.
-    if (!this.applyCommand(engine.timeoutCommand(decision.seat, decision.decisionId), false)) {
-      this.ports.log(`Default refused for ${decision.seat} ${decision.decisionId}`);
-      this.abortGame("engine refused the default action");
-    }
+    return this.applyCommand(engine.timeoutCommand(decision.seat, decision.decisionId), false);
   }
 
-  private async dispatch(decision: PendingDecision): Promise<void> {
-    const game = this.game;
-    const state = this.state;
-    const seat = this.seatOf(decision.seat);
+  private dispatch(decision: PendingDecision): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      const game = this.game;
+      const state = this.state;
+      const seat = this.seatOf(decision.seat);
 
-    if (game === undefined || state === undefined || seat === undefined) return;
+      if (game === undefined || state === undefined || seat === undefined) return;
 
-    const known = queryFirst(
-      this.ports.sql,
-      StatusRow,
-      "SELECT status FROM decisions WHERE seat = ? AND decision_id = ?",
-      decision.seat,
-      decision.decisionId,
-    );
-
-    if (known !== undefined) return;
-
-    if (this.getMeta("budgetExhausted") === "1") {
-      this.abortGame("budget exhausted");
-
-      return;
-    }
-
-    const spec = Match.valueTags(seat.spec, { llm: (llm) => llm, bot: () => undefined });
-
-    if (spec === undefined) return;
-
-    const request = this.wakeRequest(game, state, decision, spec);
-
-    this.ports.sql.transaction(() => {
-      this.ports.sql.exec(
-        "INSERT INTO decisions (seat, decision_id, status, deadline, dispatched_at, turn, frame, round, reasons) VALUES (?, ?, 'dispatched', ?, ?, ?, ?, ?, ?)",
+      const known = queryFirst(
+        this.ports.sql,
+        StatusRow,
+        "SELECT status FROM decisions WHERE seat = ? AND decision_id = ?",
         decision.seat,
         decision.decisionId,
-        request.deadline,
-        this.ports.now(),
-        request.turn,
-        request.frame,
-        request.round,
-        encodeReasons(request.reasons),
       );
-      this.ports.sql.exec(
-        "INSERT OR REPLACE INTO cursors (seat, seq) VALUES (?, ?)",
-        decision.seat,
-        this.lastSeq(),
-      );
-    });
 
-    try {
-      await this.ports.players.wake(request);
-    } catch (cause) {
-      this.ports.log(`PlayerDO wake failed for ${game.gameId}/${decision.seat}`, cause);
-      this.timeoutIfAwaited(decision.seat, decision.decisionId);
-    }
+      if (known !== undefined) return;
+
+      if (this.getMeta("budgetExhausted") === "1") {
+        this.abortGame("budget exhausted");
+
+        return;
+      }
+
+      const spec = Match.valueTags(seat.spec, { llm: (llm) => llm, bot: () => undefined });
+
+      if (spec === undefined) return;
+
+      const request = this.wakeRequest(game, state, decision, spec);
+
+      this.ports.sql.transaction(() => {
+        this.ports.sql.exec(
+          "INSERT INTO decisions (seat, decision_id, status, deadline, dispatched_at, turn, frame, round, reasons) VALUES (?, ?, 'dispatched', ?, ?, ?, ?, ?, ?)",
+          decision.seat,
+          decision.decisionId,
+          request.deadline,
+          this.ports.now(),
+          request.turn,
+          request.frame,
+          request.round,
+          encodeReasons(request.reasons),
+        );
+        this.ports.sql.exec(
+          "INSERT OR REPLACE INTO cursors (seat, seq) VALUES (?, ?)",
+          decision.seat,
+          this.lastSeq(),
+        );
+      });
+
+      yield* this.ports.players
+        .wake(request)
+        .pipe(
+          Effect.catch((cause) =>
+            Effect.logError(`PlayerDO wake failed for ${game.gameId}/${decision.seat}`, cause).pipe(
+              Effect.andThen(
+                Effect.sync(() => this.timeoutIfAwaited(decision.seat, decision.decisionId)),
+              ),
+            ),
+          ),
+        );
+    });
   }
 
   private wakeRequest(
@@ -966,47 +1023,47 @@ export class GameHost<S, E extends EngineEvent, C> {
     };
   }
 
-  private async flushProgress(): Promise<void> {
-    const game = this.game;
-    const state = this.state;
+  private flushProgress(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      const game = this.game;
+      const state = this.state;
 
-    if (game === undefined || state === undefined || this.status() !== "running") return;
+      if (game === undefined || state === undefined || this.status() !== "running") {
+        return Effect.void;
+      }
 
-    const pending = this.binding.engine.pending(state);
+      const pending = this.binding.engine.pending(state);
 
-    if (pending.turn === this.progressTurn) return;
+      if (pending.turn === this.progressTurn) return Effect.void;
 
-    this.progressTurn = pending.turn;
+      this.progressTurn = pending.turn;
 
-    try {
-      await this.ports.db.progress(game.gameId, pending.turn, pending.round, this.iso());
-    } catch (cause) {
-      this.ports.log(`D1 progress failed for ${game.gameId}`, cause);
-    }
+      return this.ports.db
+        .progress(game.gameId, pending.turn, pending.round, this.iso())
+        .pipe(
+          Effect.catch((cause) => Effect.logError(`D1 progress failed for ${game.gameId}`, cause)),
+        );
+    });
   }
 
-  private async armAlarm(): Promise<void> {
-    if (this.purged) return;
+  private armAlarm(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      if (this.purged) return Effect.void;
 
-    if (this.continueLater || this.dirty) {
-      await this.ports.setAlarm(this.ports.now());
+      if (this.continueLater || this.dirty) return this.ports.setAlarm(this.ports.now());
 
-      return;
-    }
+      if (this.finishPending || this.staleArchives().length > 0) {
+        return this.ports.setAlarm(this.ports.now() + FINISH_RETRY_MS);
+      }
 
-    if (this.finishPending || this.staleArchives().length > 0) {
-      await this.ports.setAlarm(this.ports.now() + FINISH_RETRY_MS);
+      const next = queryFirst(
+        this.ports.sql,
+        NextRow,
+        "SELECT MIN(deadline) AS deadline FROM decisions WHERE status = 'dispatched'",
+      );
 
-      return;
-    }
-
-    const next = queryFirst(
-      this.ports.sql,
-      NextRow,
-      "SELECT MIN(deadline) AS deadline FROM decisions WHERE status = 'dispatched'",
-    );
-
-    await this.ports.setAlarm(this.status() === "running" ? (next?.deadline ?? null) : null);
+      return this.ports.setAlarm(this.status() === "running" ? (next?.deadline ?? null) : null);
+    });
   }
 
   // ── the end of a game ─────────────────────────────────────────────────────────────────
@@ -1019,209 +1076,238 @@ export class GameHost<S, E extends EngineEvent, C> {
    * Re-archive the transcripts of seats that reported after the game stopped. The mark is
    * cleared before reading, so a report landing during the upload marks the seat again.
    */
-  private async refreshStaleArchives(): Promise<void> {
-    const game = this.game;
+  private refreshStaleArchives(): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      const game = this.game;
 
-    if (game === undefined || this.getMeta("finishedNotified") === undefined) return;
+      if (game === undefined || this.getMeta("finishedNotified") === undefined) return;
 
-    for (const { seat } of this.staleArchives()) {
-      this.ports.sql.exec("DELETE FROM stale_archives WHERE seat = ?", seat);
+      for (const { seat } of this.staleArchives()) {
+        this.ports.sql.exec("DELETE FROM stale_archives WHERE seat = ?", seat);
 
-      try {
-        await this.archivePut(
+        yield* this.archivePut(
           archiveKeys.seat(game.gameId, seat),
           this.transcripts(seat),
           "application/x-ndjson",
+        ).pipe(
+          Effect.catch((cause) =>
+            Effect.logError(
+              `Refreshing ${game.gameId}/${seat} transcripts failed; retrying`,
+              cause,
+            ).pipe(
+              Effect.andThen(
+                Effect.sync(() =>
+                  this.ports.sql.exec(
+                    "INSERT OR IGNORE INTO stale_archives (seat) VALUES (?)",
+                    seat,
+                  ),
+                ),
+              ),
+            ),
+          ),
         );
-      } catch (cause) {
-        this.ports.log(`Refreshing ${game.gameId}/${seat} transcripts failed; retrying`, cause);
-        this.ports.sql.exec("INSERT OR IGNORE INTO stale_archives (seat) VALUES (?)", seat);
       }
-    }
+    });
   }
 
-  private async finish(): Promise<void> {
-    const game = this.game;
-    const state = this.state;
+  private finish(): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      const game = this.game;
+      const state = this.state;
 
-    if (
-      game === undefined ||
-      state === undefined ||
-      this.getMeta("finishedNotified") !== undefined
-    ) {
-      this.finishPending = false;
+      if (
+        game === undefined ||
+        state === undefined ||
+        this.getMeta("finishedNotified") !== undefined
+      ) {
+        this.finishPending = false;
 
-      return;
-    }
-
-    const { engine, seats, codec } = this.binding;
-    const standings = engine.standings(state);
-
-    const status =
-      standings.endReason === "aborted" || !standings.finished ? "aborted" : "finished";
-
-    const events = this.eventsAfter(0);
-    const records = seats.records(events);
-    const finishedAt = this.iso();
-
-    const competitorOf = (seat: Seat | null): string | null =>
-      seat === null ? null : (this.seatOf(seat)?.competitorId ?? seat);
-
-    const counterOf = (seat: Seat) => records.counters.find((counter) => counter.seat === seat);
-    const standingOf = (seat: Seat) => standings.seats.find((standing) => standing.seat === seat);
-    const pending = engine.pending(state);
-
-    try {
-      await this.archivePut(
-        archiveKeys.config(game.gameId),
-        `${JSON.stringify(codec.encodeConfig(game.config), null, 2)}\n`,
-        "application/json",
-      );
-      await this.archivePut(
-        archiveKeys.events(game.gameId),
-        events.map((event) => `${stringify(codec.encodeEvent(event))}\n`).join(""),
-        "application/x-ndjson",
-      );
-
-      for (const seat of game.seats) {
-        await this.archivePut(
-          archiveKeys.seat(game.gameId, seat.seat),
-          this.transcripts(seat.seat),
-          "application/x-ndjson",
-        );
+        return;
       }
 
-      await this.archivePut(
-        archiveKeys.summary(game.gameId),
-        `${JSON.stringify(
-          {
-            gameId: game.gameId,
-            runId: game.runId,
-            seed: game.config.seed,
-            engine: engine.version,
-            status,
-            endReason: standings.endReason,
-            abortReason: status === "aborted" ? (this.getMeta("abortReason") ?? null) : null,
-            winner: standings.winner,
-            finishedAt,
-            seats: game.seats.map((seat) => ({
-              seat: seat.seat,
-              competitorId: seat.competitorId,
-              label: seat.label,
-              kind: seat.kind,
-              standing: standingOf(seat.seat) ?? null,
-              notes:
-                queryFirst(
-                  this.ports.sql,
-                  TextRow,
-                  "SELECT text FROM notes WHERE seat = ?",
-                  seat.seat,
-                )?.text ?? "",
-            })),
-            records: { offers: records.offers.length, auctions: records.auctions.length },
-          },
-          null,
-          2,
-        )}\n`,
-        "application/json",
+      const { engine, seats, codec } = this.binding;
+      const standings = engine.standings(state);
+
+      const status =
+        standings.endReason === "aborted" || !standings.finished ? "aborted" : "finished";
+
+      const events = this.eventsAfter(0);
+      const records = seats.records(events);
+      const finishedAt = this.iso();
+
+      const competitorOf = (seat: Seat | null): string | null =>
+        seat === null ? null : (this.seatOf(seat)?.competitorId ?? seat);
+
+      const counterOf = (seat: Seat) => records.counters.find((counter) => counter.seat === seat);
+      const standingOf = (seat: Seat) => standings.seats.find((standing) => standing.seat === seat);
+      const pending = engine.pending(state);
+
+      const delivered = yield* Effect.gen({ self: this }, function* () {
+        yield* this.archivePut(
+          archiveKeys.config(game.gameId),
+          `${JSON.stringify(codec.encodeConfig(game.config), null, 2)}\n`,
+          "application/json",
+        );
+        yield* this.archivePut(
+          archiveKeys.events(game.gameId),
+          events.map((event) => `${stringify(codec.encodeEvent(event))}\n`).join(""),
+          "application/x-ndjson",
+        );
+
+        for (const seat of game.seats) {
+          yield* this.archivePut(
+            archiveKeys.seat(game.gameId, seat.seat),
+            this.transcripts(seat.seat),
+            "application/x-ndjson",
+          );
+        }
+
+        yield* this.archivePut(
+          archiveKeys.summary(game.gameId),
+          `${JSON.stringify(
+            {
+              gameId: game.gameId,
+              runId: game.runId,
+              seed: game.config.seed,
+              engine: engine.version,
+              status,
+              endReason: standings.endReason,
+              abortReason: status === "aborted" ? (this.getMeta("abortReason") ?? null) : null,
+              winner: standings.winner,
+              finishedAt,
+              seats: game.seats.map((seat) => ({
+                seat: seat.seat,
+                competitorId: seat.competitorId,
+                label: seat.label,
+                kind: seat.kind,
+                standing: standingOf(seat.seat) ?? null,
+                notes:
+                  queryFirst(
+                    this.ports.sql,
+                    TextRow,
+                    "SELECT text FROM notes WHERE seat = ?",
+                    seat.seat,
+                  )?.text ?? "",
+              })),
+              records: { offers: records.offers.length, auctions: records.auctions.length },
+            },
+            null,
+            2,
+          )}\n`,
+          "application/json",
+        );
+
+        if (this.purged) return false;
+
+        yield* this.ports.db.finish({
+          gameId: game.gameId,
+          status,
+          endReason: standings.endReason ?? "aborted",
+          abortReason: status === "aborted" ? (this.getMeta("abortReason") ?? null) : null,
+          winnerSeat: standings.winner,
+          finishedAt,
+          turn: pending.turn,
+          round: pending.round,
+          seats: game.seats.map((seat) => ({
+            seat: seat.seat,
+            rank: status === "finished" ? (standingOf(seat.seat)?.rank ?? null) : null,
+            netWorth: standingOf(seat.seat)?.netWorth ?? 0,
+            cash: standingOf(seat.seat)?.cash ?? 0,
+            bankruptAtTurn: standingOf(seat.seat)?.bankruptAtTurn ?? null,
+            propertiesBought: counterOf(seat.seat)?.propertiesBought ?? 0,
+            housesBuilt: counterOf(seat.seat)?.housesBuilt ?? 0,
+            hotelsBuilt: counterOf(seat.seat)?.hotelsBuilt ?? 0,
+            mortgages: counterOf(seat.seat)?.mortgages ?? 0,
+            jailTurns: counterOf(seat.seat)?.jailTurns ?? 0,
+          })),
+          offers: records.offers.map((offer) => ({
+            offerId: offer.offerId,
+            turn: offer.turn,
+            round: offer.round,
+            fromSeat: offer.from,
+            fromCompetitor: competitorOf(offer.from) ?? offer.from,
+            toSeat: offer.to,
+            toCompetitor: competitorOf(offer.to),
+            give: offer.give,
+            get: offer.get,
+            replyTo: offer.replyTo,
+            comment: offer.comment,
+            status: offer.status,
+            acceptedBySeat: offer.acceptedBy,
+            acceptedByCompetitor: competitorOf(offer.acceptedBy),
+          })),
+          auctions: records.auctions.map((auction) => ({
+            auctionId: auction.auctionId,
+            turn: auction.turn,
+            kind: auction.kind,
+            property: auction.property,
+            listPrice: auction.listPrice,
+            winnerSeat: auction.winner,
+            winnerCompetitor: competitorOf(auction.winner),
+            price: auction.price,
+            bids: auction.bids,
+          })),
+        });
+
+        if (this.purged) return false;
+
+        yield* this.ports.run.gameFinished(game.runId, {
+          gameId: game.gameId,
+          status,
+          playersCount: game.seats.length,
+          finishedAt,
+          results: game.seats.map((seat) => ({
+            seat: seat.seat,
+            competitorId: seat.competitorId,
+            label: seat.label,
+            kind: seat.kind,
+            rank: status === "finished" ? (standingOf(seat.seat)?.rank ?? null) : null,
+          })),
+        });
+
+        return true;
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logError(`Finishing ${game.gameId} failed; retrying`, cause).pipe(
+            Effect.as(false),
+          ),
+        ),
       );
 
-      if (this.purged) return;
+      if (!delivered || this.purged) return;
 
-      await this.ports.db.finish({
-        gameId: game.gameId,
-        status,
-        endReason: standings.endReason ?? "aborted",
-        abortReason: status === "aborted" ? (this.getMeta("abortReason") ?? null) : null,
-        winnerSeat: standings.winner,
-        finishedAt,
-        turn: pending.turn,
-        round: pending.round,
-        seats: game.seats.map((seat) => ({
-          seat: seat.seat,
-          rank: status === "finished" ? (standingOf(seat.seat)?.rank ?? null) : null,
-          netWorth: standingOf(seat.seat)?.netWorth ?? 0,
-          cash: standingOf(seat.seat)?.cash ?? 0,
-          bankruptAtTurn: standingOf(seat.seat)?.bankruptAtTurn ?? null,
-          propertiesBought: counterOf(seat.seat)?.propertiesBought ?? 0,
-          housesBuilt: counterOf(seat.seat)?.housesBuilt ?? 0,
-          hotelsBuilt: counterOf(seat.seat)?.hotelsBuilt ?? 0,
-          mortgages: counterOf(seat.seat)?.mortgages ?? 0,
-          jailTurns: counterOf(seat.seat)?.jailTurns ?? 0,
-        })),
-        offers: records.offers.map((offer) => ({
-          offerId: offer.offerId,
-          turn: offer.turn,
-          round: offer.round,
-          fromSeat: offer.from,
-          fromCompetitor: competitorOf(offer.from) ?? offer.from,
-          toSeat: offer.to,
-          toCompetitor: competitorOf(offer.to),
-          give: offer.give,
-          get: offer.get,
-          replyTo: offer.replyTo,
-          comment: offer.comment,
-          status: offer.status,
-          acceptedBySeat: offer.acceptedBy,
-          acceptedByCompetitor: competitorOf(offer.acceptedBy),
-        })),
-        auctions: records.auctions.map((auction) => ({
-          auctionId: auction.auctionId,
-          turn: auction.turn,
-          kind: auction.kind,
-          property: auction.property,
-          listPrice: auction.listPrice,
-          winnerSeat: auction.winner,
-          winnerCompetitor: competitorOf(auction.winner),
-          price: auction.price,
-          bids: auction.bids,
-        })),
-      });
-
-      if (this.purged) return;
-
-      await this.ports.run.gameFinished(game.runId, {
-        gameId: game.gameId,
-        status,
-        playersCount: game.seats.length,
-        finishedAt,
-        results: game.seats.map((seat) => ({
-          seat: seat.seat,
-          competitorId: seat.competitorId,
-          label: seat.label,
-          kind: seat.kind,
-          rank: status === "finished" ? (standingOf(seat.seat)?.rank ?? null) : null,
-        })),
-      });
-    } catch (cause) {
-      this.ports.log(`Finishing ${game.gameId} failed; retrying`, cause);
-
-      return;
-    }
-
-    if (this.purged) return;
-
-    this.setMeta("finishedNotified", finishedAt);
-    this.setMeta("status", status);
-    this.finishPending = false;
-    this.ports.broadcast(encodeSpectatorMessage(SpectatorMessage.cases.Status.make({ status })));
+      this.setMeta("finishedNotified", finishedAt);
+      this.setMeta("status", status);
+      this.finishPending = false;
+      this.ports.broadcast(encodeSpectatorMessage(SpectatorMessage.cases.Status.make({ status })));
+    });
   }
 
   // ── small helpers ─────────────────────────────────────────────────────────────────────
 
   /** R2 write that a deleted game skips (its archive is being deleted). */
-  private async archivePut(key: string, body: string, contentType: string): Promise<void> {
-    if (this.purged) return;
+  private archivePut(
+    key: string,
+    body: string,
+    contentType: string,
+  ): Effect.Effect<void, UpstreamError> {
+    return Effect.suspend(() => {
+      if (this.purged) return Effect.void;
 
-    const write = this.ports.archive.put(key, body, contentType);
+      const written = Deferred.makeUnsafe<void>();
 
-    this.archiveWrites.add(write);
+      this.archiveWrites.add(written);
 
-    try {
-      await write;
-    } finally {
-      this.archiveWrites.delete(write);
-    }
+      return this.ports.archive.put(key, body, contentType).pipe(
+        Effect.ensuring(
+          Effect.suspend(() => {
+            this.archiveWrites.delete(written);
+
+            return Deferred.succeed(written, undefined);
+          }),
+        ),
+      );
+    });
   }
 
   private eventsAfter(since: number): ReadonlyArray<E> {

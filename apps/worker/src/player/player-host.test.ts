@@ -15,9 +15,11 @@ import {
 } from "@mb/agent/testing";
 import { LlmSeat, type SeatActivity } from "@mb/api";
 import { defaultRules } from "@mb/engine";
+import { Effect } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { SeatCall, WakeReport, WakeRequest } from "../contracts.ts";
+import { port, run } from "../testing/effect.ts";
 import { memorySqlPort } from "../testing/sqlite.ts";
 import { openRouterKeyFor, PlayerHost } from "./player-host.ts";
 
@@ -50,14 +52,14 @@ const setup = (responses: ReadonlyArray<FauxResponseStep>, options: Options = {}
   const reports: Array<WakeReport> = [];
   const activity: Array<SeatActivity> = [];
   const alarms: Array<number | null> = [];
-  const logs: Array<string> = [];
   const clock = { now: 1_000 };
 
-  const answer = async (kind: string, call: SeatCall) => {
-    calls.push({ kind, call });
+  const answer = (kind: string, call: SeatCall) =>
+    Effect.sync(() => {
+      calls.push({ kind, call });
 
-    return { ok: true, message: `${call.tool} ok`, terminal: call.tool === "done" };
-  };
+      return { ok: true, message: `${call.tool} ok`, terminal: call.tool === "done" };
+    });
 
   let failReports = 0;
 
@@ -68,30 +70,30 @@ const setup = (responses: ReadonlyArray<FauxResponseStep>, options: Options = {}
         submit: (call) => answer("submit", call),
         done: (call) => answer("done", call),
         inspect: (call) => answer("inspect", call),
-        activity: async (_gameId, event) => {
-          activity.push(event);
-        },
-        wakeFinished: async (report) => {
+        activity: (_gameId, event) =>
+          Effect.sync(() => {
+            activity.push(event);
+          }),
+        wakeFinished: port((report: WakeReport) => {
           if (failReports > 0) {
             failReports -= 1;
             throw new Error("GameDO unreachable");
           }
 
           reports.push(report);
-        },
+        }),
       },
-      models: async () => ({
-        model: scripted.model,
-        streamFn: scripted.streamFn,
-        apiKey: options.apiKey ?? "test",
-      }),
-      setAlarm: async (at) => {
-        alarms.push(at);
-      },
+      models: () =>
+        Effect.succeed({
+          model: scripted.model,
+          streamFn: scripted.streamFn,
+          apiKey: options.apiKey ?? "test",
+        }),
+      setAlarm: (at) =>
+        Effect.sync(() => {
+          alarms.push(at);
+        }),
       now: () => clock.now,
-      log: (message, cause) => {
-        logs.push(`${message} ${String(cause)}`);
-      },
       memory: options.memory ?? DEFAULT_MEMORY_LIMITS,
     });
 
@@ -105,7 +107,6 @@ const setup = (responses: ReadonlyArray<FauxResponseStep>, options: Options = {}
     reports,
     activity,
     alarms,
-    logs,
     clock,
     failNextReports: (count: number) => {
       failReports = count;
@@ -140,12 +141,12 @@ describe("PlayerHost", () => {
       ),
     ]);
 
-    await h.host.wake(request("d1", 999_999));
+    await run(h.host.wake(request("d1", 999_999)));
 
     expect(h.alarms).toEqual([1_000]);
     expect(h.calls).toHaveLength(0);
 
-    await h.host.alarm();
+    await run(h.host.alarm());
 
     expect(h.calls.map((entry) => [entry.kind, entry.call.tool])).toEqual([
       ["submit", "note"],
@@ -164,16 +165,16 @@ describe("PlayerHost", () => {
     expect(h.activity.length).toBeGreaterThan(0);
 
     // Running the alarm again does nothing: the wake is done.
-    await h.host.alarm();
+    await run(h.host.alarm());
     expect(h.reports).toHaveLength(1);
   });
 
   it("ignores a duplicate wake request", async () => {
     const h = setup([toolTurn(fauxToolCall("done", {}))]);
 
-    await h.host.wake(request("d1", 999_999));
-    await h.host.wake(request("d1", 999_999));
-    await h.host.alarm();
+    await run(h.host.wake(request("d1", 999_999)));
+    await run(h.host.wake(request("d1", 999_999)));
+    await run(h.host.alarm());
 
     expect(h.reports).toHaveLength(1);
     expect(h.scripted.faux.state.callCount).toBe(1);
@@ -190,16 +191,16 @@ describe("PlayerHost", () => {
 
     const h = setup([respond, respond, respond]);
 
-    await h.host.wake(request("d1", 999_999));
-    await h.host.alarm();
-    await h.host.wake(request("d2", 999_999));
-    await h.host.alarm();
+    await run(h.host.wake(request("d1", 999_999)));
+    await run(h.host.alarm());
+    await run(h.host.wake(request("d2", 999_999)));
+    await run(h.host.alarm());
 
     // A new object over the same storage continues the same conversation.
     const reopened = h.reopen();
 
-    await reopened.wake(request("d3", 999_999));
-    await reopened.alarm();
+    await run(reopened.wake(request("d3", 999_999)));
+    await run(reopened.alarm());
 
     // system + wake: 2, then each wake adds its answer, the tool result and its own message.
     expect(lengths).toEqual([2, 5, 8]);
@@ -216,8 +217,8 @@ describe("PlayerHost", () => {
     );
 
     for (const decisionId of ["d1", "d2", "d3", "d4"]) {
-      await h.host.wake(request(decisionId, 999_999));
-      await h.host.alarm();
+      await run(h.host.wake(request(decisionId, 999_999)));
+      await run(h.host.alarm());
     }
 
     const last = h.reports.at(-1);
@@ -237,8 +238,8 @@ describe("PlayerHost", () => {
   it("does not call the model after the deadline", async () => {
     const h = setup([toolTurn(fauxToolCall("done", {}))]);
 
-    await h.host.wake(request("d1", 500));
-    await h.host.alarm();
+    await run(h.host.wake(request("d1", 500)));
+    await run(h.host.alarm());
 
     expect(h.scripted.faux.state.callCount).toBe(0);
     expect(h.reports[0]?.endReason).toBe("expired");
@@ -248,13 +249,13 @@ describe("PlayerHost", () => {
     const h = setup([toolTurn(fauxToolCall("done", {}))]);
     h.failNextReports(1);
 
-    await h.host.wake(request("d1", 999_999));
-    await h.host.alarm();
+    await run(h.host.wake(request("d1", 999_999)));
+    await run(h.host.alarm());
 
     expect(h.reports).toHaveLength(0);
     expect(h.alarms.at(-1)).toBe(11_000);
 
-    await h.host.alarm();
+    await run(h.host.alarm());
 
     expect(h.reports).toHaveLength(1);
     expect(h.reports[0]?.endReason).toBe("answered");
@@ -269,8 +270,8 @@ describe("PlayerHost", () => {
       { apiKey: key },
     );
 
-    await h.host.wake(request("d1", 999_999));
-    await h.host.alarm();
+    await run(h.host.wake(request("d1", 999_999)));
+    await run(h.host.alarm());
 
     const text = h.reports[0]?.transcript.text ?? "";
 
@@ -284,16 +285,16 @@ describe("PlayerHost", () => {
   it("forgets everything when purged; a wake still running writes nothing", async () => {
     const h = setup([toolTurn(fauxToolCall("done", {}))]);
 
-    await h.host.wake(request("d1", 999_999));
-    await h.host.alarm();
-    await h.host.wake(request("d2", 999_999));
-    await h.host.purge();
+    await run(h.host.wake(request("d1", 999_999)));
+    await run(h.host.alarm());
+    await run(h.host.wake(request("d2", 999_999)));
+    await run(h.host.purge());
 
     expect(h.sql.exec("SELECT * FROM wakes")).toEqual([]);
     expect(h.sql.exec("SELECT * FROM conversation")).toEqual([]);
     expect(h.alarms.at(-1)).toBeNull();
 
-    await h.host.alarm();
+    await run(h.host.alarm());
 
     expect(h.reports).toHaveLength(1);
   });

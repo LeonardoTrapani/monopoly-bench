@@ -17,7 +17,9 @@ import {
   supportsTools,
 } from "@mb/agent";
 import type { CatalogResponse } from "@mb/api";
-import { Schema } from "effect";
+import { Clock, Context, Effect, Layer, Schema, Semaphore } from "effect";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
 
 import { ModelListing } from "./contracts.ts";
 
@@ -61,59 +63,69 @@ interface CachedSnapshot {
   readonly snapshot: CatalogSnapshot;
 }
 
-export class ModelCatalog {
-  private cached: CachedSnapshot | undefined = undefined;
-  private loading: Promise<CatalogSnapshot> | undefined = undefined;
+/** OpenRouter answered, but with no model a run could seat. */
+class EmptyModelList extends Schema.TaggedError<EmptyModelList>()("EmptyModelList", {}) {}
 
-  constructor(
-    private readonly fetcher: typeof fetch,
-    private readonly now: () => number,
-    private readonly log: (message: string, cause?: unknown) => void,
-  ) {}
+/** A catalog cached for as long as it lives (one per Worker isolate). */
+const make = Effect.gen(function* () {
+  const client = yield* HttpClient.HttpClient;
+  const loading = yield* Semaphore.make(1);
+  let cached: CachedSnapshot | undefined;
 
-  /** The current snapshot; concurrent callers share one OpenRouter request. */
-  snapshot(): Promise<CatalogSnapshot> {
-    const cached = this.cached;
-
-    if (cached !== undefined && this.now() < cached.expiresAt) {
-      return Promise.resolve(cached.snapshot);
-    }
-
-    this.loading ??= this.load().finally(() => {
-      this.loading = undefined;
-    });
-
-    return this.loading;
-  }
-
-  private async load(): Promise<CatalogSnapshot> {
-    const at = this.now();
+  const load = Effect.gen(function* () {
+    const at = yield* Clock.currentTimeMillis;
     const updatedAt = new Date(at).toISOString();
 
-    try {
-      const response = await this.fetcher(OPENROUTER_MODELS_URL, {
-        headers: { accept: "application/json" },
-      });
+    const fresh = yield* client
+      .get(OPENROUTER_MODELS_URL, { headers: { accept: "application/json" } })
+      .pipe(
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.flatMap((response) => response.text),
+        Effect.flatMap((text) =>
+          Effect.try({
+            try: () => liveSnapshot(listingsOfModelList(text), updatedAt),
+            catch: (cause) => cause,
+          }),
+        ),
+        Effect.flatMap((snapshot) =>
+          snapshot.catalog.models.length === 0
+            ? Effect.fail(new EmptyModelList())
+            : Effect.succeed({ expiresAt: at + CATALOG_TTL_MS, snapshot }),
+        ),
+        Effect.catch((cause) =>
+          Effect.logError(
+            "OpenRouter model list unavailable; serving pi-ai's bundled list",
+            cause,
+          ).pipe(
+            Effect.as({ expiresAt: at + BUNDLED_TTL_MS, snapshot: bundledSnapshot(updatedAt) }),
+          ),
+        ),
+      );
 
-      if (!response.ok) throw new Error(`OpenRouter answered ${response.status}`);
+    cached = fresh;
 
-      const snapshot = liveSnapshot(listingsOfModelList(await response.text()), updatedAt);
+    return fresh.snapshot;
+  });
 
-      if (snapshot.catalog.models.length === 0) throw new Error("OpenRouter listed no tool models");
+  return {
+    snapshot: loading.withPermits(1)(
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis;
 
-      this.cached = { expiresAt: at + CATALOG_TTL_MS, snapshot };
+        return cached !== undefined && now < cached.expiresAt ? cached.snapshot : yield* load;
+      }),
+    ),
+  };
+});
 
-      return snapshot;
-    } catch (cause) {
-      this.log("OpenRouter model list unavailable; serving pi-ai's bundled list", cause);
-
-      const snapshot = bundledSnapshot(updatedAt);
-
-      this.cached = { expiresAt: at + BUNDLED_TTL_MS, snapshot };
-
-      return snapshot;
-    }
+export class ModelCatalog extends Context.Service<
+  ModelCatalog,
+  {
+    /** The current snapshot; concurrent callers share one OpenRouter request. */
+    readonly snapshot: Effect.Effect<CatalogSnapshot>;
   }
+>()("monopoly-bench/ModelCatalog") {
+  static readonly layer = Layer.effect(ModelCatalog, make);
 }
 
 /** Smallest context window a seat can play with: ~10k fixed tokens plus room for memory. */

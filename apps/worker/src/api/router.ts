@@ -26,7 +26,10 @@ import {
   Seat,
 } from "@mb/api";
 import type { D1Client } from "@effect/sql-d1";
-import { Cause, Effect, Option, Schema } from "effect";
+import { Effect, Option, Schema } from "effect";
+import type * as HttpServerError from "effect/http/HttpServerError";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import type * as HttpServerResponse from "effect/http/HttpServerResponse";
 import { SqlClient } from "effect/sql";
 import type { SqlError } from "effect/sql/SqlError";
 
@@ -50,6 +53,7 @@ import {
   runPlayersCount,
   saveCompetitorNames,
 } from "../db/writes.ts";
+import type { UpstreamError } from "../errors.ts";
 import type { KeyCheck } from "../openrouter-key.ts";
 import { isAuthorized, sha256Hex } from "./auth.ts";
 import { errorJson, json, jsonText, ndjson, noContent, preflight } from "./http.ts";
@@ -61,31 +65,46 @@ export interface RunsGateway {
     config: RunConfig,
     listings: ReadonlyArray<ModelListing>,
     ownKey: OwnKeyFunding | null,
-  ) => Promise<RunSummary>;
-  readonly cancel: (runId: string) => Promise<RunSummary | null>;
+  ) => Effect.Effect<RunSummary, UpstreamError>;
+  readonly cancel: (runId: string) => Effect.Effect<RunSummary | null, UpstreamError>;
   /** Whether `tokenSha256` is the SHA-256 of the run's cancel token (own-key runs only). */
-  readonly cancelTokenMatches: (runId: string, tokenSha256: string) => Promise<boolean>;
+  readonly cancelTokenMatches: (
+    runId: string,
+    tokenSha256: string,
+  ) => Effect.Effect<boolean, UpstreamError>;
   /** Stop the run's games for good and wipe its Durable Objects (run, games, seats). */
-  readonly purge: (runId: string) => Promise<void>;
+  readonly purge: (runId: string) => Effect.Effect<void, UpstreamError>;
 }
 
 export interface GamesGateway {
   /** NDJSON events with `seq > since`, from the game's Durable Object. */
-  readonly liveEvents: (gameId: string, since: number) => Promise<string>;
+  readonly liveEvents: (gameId: string, since: number) => Effect.Effect<string, UpstreamError>;
   /** `games/<id>/events.jsonl` from R2, or null when not archived. */
-  readonly archivedEvents: (gameId: string) => Promise<string | null>;
+  readonly archivedEvents: (gameId: string) => Effect.Effect<string | null, UpstreamError>;
   /** NDJSON `WakeTranscript`s recorded so far by the game's Durable Object. */
-  readonly liveTranscripts: (gameId: string, seat: Seat | null) => Promise<string>;
+  readonly liveTranscripts: (
+    gameId: string,
+    seat: Seat | null,
+  ) => Effect.Effect<string, UpstreamError>;
   /** `games/<id>/seats/<seat>.jsonl` from R2, or null when not archived. */
-  readonly archivedTranscripts: (gameId: string, seat: Seat) => Promise<string | null>;
+  readonly archivedTranscripts: (
+    gameId: string,
+    seat: Seat,
+  ) => Effect.Effect<string | null, UpstreamError>;
   /** The engine `GameConfig` JSON from the game's Durable Object, or null before it starts. */
-  readonly liveConfig: (gameId: string) => Promise<string | null>;
+  readonly liveConfig: (gameId: string) => Effect.Effect<string | null, UpstreamError>;
   /** `games/<id>/config.json` from R2, or null when not archived. */
-  readonly archivedConfig: (gameId: string) => Promise<string | null>;
+  readonly archivedConfig: (gameId: string) => Effect.Effect<string | null, UpstreamError>;
   /** Forward a WebSocket upgrade to the game's Durable Object. */
-  readonly spectate: (gameId: string, request: Request) => Promise<Response>;
+  readonly spectate: (
+    gameId: string,
+    request: HttpServerRequest.HttpServerRequest,
+  ) => Effect.Effect<HttpServerResponse.HttpServerResponse, UpstreamError>;
   /** Delete every R2 object of these games of the run (`games/<gameId>/…`). */
-  readonly deleteArchives: (runId: string, gameIds: ReadonlyArray<string>) => Promise<void>;
+  readonly deleteArchives: (
+    runId: string,
+    gameIds: ReadonlyArray<string>,
+  ) => Effect.Effect<void, UpstreamError>;
 }
 
 export interface ApiDeps {
@@ -93,9 +112,9 @@ export interface ApiDeps {
   readonly runs: RunsGateway;
   readonly games: GamesGateway;
   /** OpenRouter's tool models and their prices (`GET /api/catalog`, run validation). */
-  readonly catalog: () => Promise<CatalogSnapshot>;
+  readonly catalog: Effect.Effect<CatalogSnapshot>;
   /** Asks OpenRouter about a creator's own key (`GET /api/v1/key`). */
-  readonly checkOpenRouterKey: (key: string) => Promise<KeyCheck>;
+  readonly checkOpenRouterKey: (key: string) => Effect.Effect<KeyCheck>;
   readonly newRunId: () => string;
   readonly newCancelToken: () => string;
 }
@@ -127,12 +146,6 @@ const decodeSince = Schema.decodeUnknownOption(
   Schema.NumberFromString.pipe(Schema.decodeTo(Schema.Int)),
 );
 
-const promise = <A>(evaluate: () => Promise<A>) =>
-  Effect.tryPromise({
-    try: evaluate,
-    catch: (cause) => new Error("Upstream call failed", { cause }),
-  });
-
 class HttpFailure extends Schema.TaggedError<HttpFailure>()("HttpFailure", {
   status: Schema.Int,
   message: Schema.String,
@@ -140,17 +153,19 @@ class HttpFailure extends Schema.TaggedError<HttpFailure>()("HttpFailure", {
 
 const fail = (status: number, message: string) => Effect.fail(new HttpFailure({ status, message }));
 
-const isBenchOwner = (request: Request, deps: ApiDeps) =>
-  promise(() => isAuthorized(request.headers.get("authorization"), deps.benchApiKey));
-
-const requireAuth = (request: Request, deps: ApiDeps, message: string) =>
-  isBenchOwner(request, deps).pipe(Effect.flatMap((ok) => (ok ? Effect.void : fail(401, message))));
+type Request = HttpServerRequest.HttpServerRequest;
 
 const header = (request: Request, name: string): string | null => {
-  const value = request.headers.get(name)?.trim() ?? "";
+  const value = request.headers[name]?.trim() ?? "";
 
   return value.length === 0 ? null : value;
 };
+
+const isBenchOwner = (request: Request, deps: ApiDeps) =>
+  isAuthorized(header(request, "authorization"), deps.benchApiKey);
+
+const requireAuth = (request: Request, deps: ApiDeps, message: string) =>
+  isBenchOwner(request, deps).pipe(Effect.flatMap((ok) => (ok ? Effect.void : fail(401, message))));
 
 const playersParam = (
   url: URL,
@@ -176,7 +191,7 @@ const checkOwnKey = Effect.fn("checkOwnKey")(function* (
   key: string,
   budgetUsd: number,
 ) {
-  const check = yield* promise(() => deps.checkOpenRouterKey(key));
+  const check = yield* deps.checkOpenRouterKey(key);
 
   if (check.status === "rejected") {
     return yield* fail(
@@ -224,7 +239,7 @@ const createRun = Effect.fn("createRun")(function* (request: Request, deps: ApiD
     );
   }
 
-  const body = yield* promise(() => request.text());
+  const body = yield* request.text;
 
   const seatsBot = Option.match(decodeSeats(body), {
     onSome: (seats) => seats.players.some(isBotSeat),
@@ -239,7 +254,7 @@ const createRun = Effect.fn("createRun")(function* (request: Request, deps: ApiD
     Effect.catchTag("SchemaError", (error) => fail(400, `Invalid RunConfig: ${error.message}`)),
   );
 
-  const snapshot = yield* promise(() => deps.catalog());
+  const snapshot = yield* deps.catalog;
   const modelIds = [...new Set(config.players.map((seat) => seat.model))];
 
   const problems = modelIds.flatMap((model) => {
@@ -261,20 +276,18 @@ const createRun = Effect.fn("createRun")(function* (request: Request, deps: ApiD
   yield* saveCompetitorNames(competitorNames(config, snapshot));
 
   if (ownKey === null) {
-    const run = yield* promise(() => deps.runs.create(deps.newRunId(), config, listings, null));
+    const run = yield* deps.runs.create(deps.newRunId(), config, listings, null);
 
     return json(CreateRunResponse, { run, cancelToken: null }, 201);
   }
 
   const cancelToken = deps.newCancelToken();
-  const cancelTokenSha256 = yield* promise(() => sha256Hex(cancelToken));
+  const cancelTokenSha256 = yield* sha256Hex(cancelToken);
 
-  const run = yield* promise(() =>
-    deps.runs.create(deps.newRunId(), config, listings, {
-      openRouterKey: ownKey,
-      cancelTokenSha256,
-    }),
-  );
+  const run = yield* deps.runs.create(deps.newRunId(), config, listings, {
+    openRouterKey: ownKey,
+    cancelTokenSha256,
+  });
 
   return json(CreateRunResponse, { run, cancelToken }, 201);
 });
@@ -290,7 +303,9 @@ const cancelRun = Effect.fn("cancelRun")(function* (
 
     const matches =
       token !== null &&
-      (yield* promise(async () => deps.runs.cancelTokenMatches(runId, await sha256Hex(token))));
+      (yield* sha256Hex(token).pipe(
+        Effect.flatMap((tokenSha256) => deps.runs.cancelTokenMatches(runId, tokenSha256)),
+      ));
 
     if (!matches) {
       return yield* fail(
@@ -300,7 +315,7 @@ const cancelRun = Effect.fn("cancelRun")(function* (
     }
   }
 
-  const run = yield* promise(() => deps.runs.cancel(runId));
+  const run = yield* deps.runs.cancel(runId);
 
   return run === null
     ? errorJson(404, "Run not found")
@@ -323,11 +338,11 @@ const deleteRun = Effect.fn("deleteRun")(function* (
 
   if (playersCount === null) return errorJson(404, "Run not found");
 
-  yield* promise(() => deps.runs.purge(runId));
+  yield* deps.runs.purge(runId);
 
   const gameIds = yield* runGameIds(runId);
 
-  yield* promise(() => deps.games.deleteArchives(runId, gameIds));
+  yield* deps.games.deleteArchives(runId, gameIds);
   yield* deleteRunGames(runId);
   yield* recomputeRatings(playersCount);
   yield* deleteRunRow(runId);
@@ -348,12 +363,12 @@ const gameEvents = Effect.fn("gameEvents")(function* (deps: ApiDeps, gameId: str
   const after = since.value;
 
   if (game.status === "running" || game.status === "queued") {
-    return ndjson(yield* promise(() => deps.games.liveEvents(gameId, after)));
+    return ndjson(yield* deps.games.liveEvents(gameId, after));
   }
 
-  const archived = yield* promise(() => deps.games.archivedEvents(gameId));
+  const archived = yield* deps.games.archivedEvents(gameId);
 
-  if (archived === null) return ndjson(yield* promise(() => deps.games.liveEvents(gameId, after)));
+  if (archived === null) return ndjson(yield* deps.games.liveEvents(gameId, after));
 
   return ndjson(
     archived
@@ -383,17 +398,21 @@ const gameTranscripts = Effect.fn("gameTranscripts")(function* (
   if (Option.isNone(seat)) return errorJson(400, "seat must be a seat letter A-F");
 
   if (game.status === "running" || game.status === "queued") {
-    return ndjson(yield* promise(() => deps.games.liveTranscripts(gameId, seat.value)));
+    return ndjson(yield* deps.games.liveTranscripts(gameId, seat.value));
   }
 
   const seats = seat.value === null ? game.seats.map((entry) => entry.seat) : [seat.value];
 
-  const files = yield* promise(() =>
-    Promise.all(seats.map((letter) => deps.games.archivedTranscripts(gameId, letter))),
+  const files = yield* Effect.forEach(
+    seats,
+    (letter) => deps.games.archivedTranscripts(gameId, letter),
+    {
+      concurrency: "unbounded",
+    },
   );
 
   if (files.some((file) => file === null)) {
-    return ndjson(yield* promise(() => deps.games.liveTranscripts(gameId, seat.value)));
+    return ndjson(yield* deps.games.liveTranscripts(gameId, seat.value));
   }
 
   return ndjson(files.join(""));
@@ -406,8 +425,8 @@ const gameConfig = Effect.fn("gameConfig")(function* (deps: ApiDeps, gameId: str
   if (game === null) return errorJson(404, "Game not found");
 
   const finished = game.status !== "running" && game.status !== "queued";
-  const archived = finished ? yield* promise(() => deps.games.archivedConfig(gameId)) : null;
-  const config = archived ?? (yield* promise(() => deps.games.liveConfig(gameId)));
+  const archived = finished ? yield* deps.games.archivedConfig(gameId) : null;
+  const config = archived ?? (yield* deps.games.liveConfig(gameId));
 
   return config === null ? errorJson(404, "Game has not started") : jsonText(config);
 });
@@ -424,11 +443,14 @@ const route = (
   request: Request,
   deps: ApiDeps,
 ): Effect.Effect<
-  Response,
-  HttpFailure | Error | Schema.SchemaError | SqlError,
+  HttpServerResponse.HttpServerResponse,
+  HttpFailure | UpstreamError | HttpServerError.HttpServerError | Schema.SchemaError | SqlError,
   SqlClient.SqlClient | D1Client.D1Client
 > => {
-  const url = new URL(request.url);
+  const url = Option.getOrElse(
+    HttpServerRequest.toURL(request),
+    () => new URL(request.url, "http://localhost"),
+  );
 
   const parts = url.pathname
     .split("/")
@@ -448,9 +470,7 @@ const route = (
   }
 
   if (resource === "catalog" && parts.length === 1 && method === "GET") {
-    return promise(() => deps.catalog()).pipe(
-      Effect.map((snapshot) => json(CatalogResponse, snapshot.catalog)),
-    );
+    return deps.catalog.pipe(Effect.map((snapshot) => json(CatalogResponse, snapshot.catalog)));
   }
 
   if (resource === "models" && method === "GET") {
@@ -531,11 +551,11 @@ const route = (
     if (parts.length === 3 && id !== undefined && action === "config") return gameConfig(deps, id);
 
     if (parts.length === 3 && id !== undefined && action === "ws") {
-      if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      if (request.headers.upgrade?.toLowerCase() !== "websocket") {
         return fail(426, "Expected a WebSocket upgrade");
       }
 
-      return promise(() => deps.games.spectate(id, request));
+      return deps.games.spectate(id, request);
     }
   }
 
@@ -546,14 +566,16 @@ const route = (
 export const handleApi = (
   request: Request,
   deps: ApiDeps,
-): Effect.Effect<Response, never, SqlClient.SqlClient | D1Client.D1Client> =>
+): Effect.Effect<
+  HttpServerResponse.HttpServerResponse,
+  never,
+  SqlClient.SqlClient | D1Client.D1Client
+> =>
   route(request, deps).pipe(
     Effect.catchTag("HttpFailure", (failure) =>
       Effect.succeed(errorJson(failure.status, failure.message)),
     ),
-    Effect.catchCause((cause) => {
-      console.error("API error", Cause.pretty(cause));
-
-      return Effect.succeed(errorJson(500, "Internal error"));
-    }),
+    Effect.catchCause((cause) =>
+      Effect.logError("API error", cause).pipe(Effect.as(errorJson(500, "Internal error"))),
+    ),
   );

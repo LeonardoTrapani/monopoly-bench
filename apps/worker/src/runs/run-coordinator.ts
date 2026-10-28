@@ -8,7 +8,7 @@
  * `credentials()`, and it is deleted as soon as the run finishes, is cancelled or is purged.
  */
 import { RunConfig, RunFunding, type RunStatus, type RunSummary, type Seat } from "@mb/api";
-import { Match, Schema } from "effect";
+import { Effect, Match, Schema } from "effect";
 
 import {
   type ChargeResult,
@@ -21,6 +21,7 @@ import {
 } from "../contracts.ts";
 import type { GameRatingInput } from "../db/ratings-store.ts";
 import type { NewRun } from "../db/writes.ts";
+import type { UpstreamError } from "../errors.ts";
 import { jsonColumn, queryFirst, queryRows, type SqlPort } from "../sql.ts";
 import { charge, isExhausted, mayRun } from "./budget.ts";
 import { DEFAULT_CONCURRENCY, expandRun, gameConfigOf, type PlannedGame } from "./expand.ts";
@@ -32,32 +33,42 @@ const RATING_RETRY_MS = 30_000;
 export const WATCHDOG_MS = 10 * 60_000;
 
 export interface RunDbPort {
-  readonly insertRun: (run: NewRun) => Promise<void>;
+  readonly insertRun: (run: NewRun) => Effect.Effect<void, UpstreamError>;
   readonly updateRun: (
     runId: string,
     status: RunStatus,
     spentUsd: number,
     finishedAt: string | null,
-  ) => Promise<void>;
-  readonly abortQueued: (gameIds: ReadonlyArray<string>, at: string) => Promise<void>;
-  readonly applyRatings: (input: GameRatingInput) => Promise<void>;
+  ) => Effect.Effect<void, UpstreamError>;
+  readonly abortQueued: (
+    gameIds: ReadonlyArray<string>,
+    at: string,
+  ) => Effect.Effect<void, UpstreamError>;
+  readonly applyRatings: (input: GameRatingInput) => Effect.Effect<void, UpstreamError>;
 }
 
 export interface GamesLinkPort {
-  readonly start: (start: GameStart) => Promise<void>;
-  readonly abort: (gameId: string, reason: string) => Promise<void>;
+  readonly start: (start: GameStart) => Effect.Effect<void, UpstreamError>;
+  readonly abort: (gameId: string, reason: string) => Effect.Effect<void, UpstreamError>;
   /** Wipe a started game's GameDO and the PlayerDOs of its LLM seats; they stop for good. */
-  readonly purge: (gameId: string, llmSeats: ReadonlyArray<Seat>) => Promise<void>;
+  readonly purge: (
+    gameId: string,
+    llmSeats: ReadonlyArray<Seat>,
+  ) => Effect.Effect<void, UpstreamError>;
 }
 
 export interface RunPorts {
   readonly sql: SqlPort;
   readonly db: RunDbPort;
   readonly games: GamesLinkPort;
-  readonly setAlarm: (at: number | null) => Promise<void>;
+  readonly setAlarm: (at: number | null) => Effect.Effect<void>;
   readonly now: () => number;
-  readonly log: (message: string, cause?: unknown) => void;
 }
+
+/** The run was created but its row is missing: the object's storage is broken. */
+export class RunNotStored extends Schema.TaggedError<RunNotStored>()("RunNotStored", {
+  runId: Schema.String,
+}) {}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS run (
@@ -142,117 +153,123 @@ export class RunCoordinator {
    * API → RunDO. `ownKey` is null for a server-funded run. Idempotent: creating an existing run
    * returns its summary.
    */
-  async create(
+  create(
     runId: string,
     config: RunConfig,
     listings: ReadonlyArray<ModelListing>,
     ownKey: OwnKeyFunding | null,
-  ): Promise<RunSummary> {
-    if (this.run() === undefined) {
-      const createdAt = this.iso();
-      const games = expandRun(runId, config);
-      const funding: RunFunding = ownKey === null ? "server" : "ownKey";
+  ): Effect.Effect<RunSummary, UpstreamError | RunNotStored> {
+    return Effect.gen({ self: this }, function* () {
+      if (this.run() === undefined) {
+        const createdAt = this.iso();
+        const games = expandRun(runId, config);
+        const funding: RunFunding = ownKey === null ? "server" : "ownKey";
 
-      await this.ports.db.insertRun({ id: runId, createdAt, funding, config, games });
-      this.ports.sql.transaction(() => {
-        this.ports.sql.exec(
-          "INSERT INTO funding (id, funding, cancel_token_sha256, openrouter_key) VALUES (1, ?, ?, ?)",
-          funding,
-          ownKey?.cancelTokenSha256 ?? null,
-          ownKey?.openRouterKey ?? null,
-        );
-        this.ports.sql.exec(
-          "INSERT INTO run (id, run_id, created_at, status, config_json, listings_json, spent_usd) VALUES (1, ?, ?, 'running', ?, ?, 0)",
-          runId,
-          createdAt,
-          encodeConfig(config),
-          encodeListings(listings),
-        );
-
-        for (const game of games) {
+        yield* this.ports.db.insertRun({ id: runId, createdAt, funding, config, games });
+        this.ports.sql.transaction(() => {
           this.ports.sql.exec(
-            "INSERT INTO games (game_id, game_index, status, has_llm, plan_json) VALUES (?, ?, 'queued', ?, ?)",
-            game.gameId,
-            game.gameIndex,
-            game.hasLlm ? 1 : 0,
-            encodePlan(game),
+            "INSERT INTO funding (id, funding, cancel_token_sha256, openrouter_key) VALUES (1, ?, ?, ?)",
+            funding,
+            ownKey?.cancelTokenSha256 ?? null,
+            ownKey?.openRouterKey ?? null,
           );
-        }
-      });
-      await this.pump();
-    }
+          this.ports.sql.exec(
+            "INSERT INTO run (id, run_id, created_at, status, config_json, listings_json, spent_usd) VALUES (1, ?, ?, 'running', ?, ?, 0)",
+            runId,
+            createdAt,
+            encodeConfig(config),
+            encodeListings(listings),
+          );
 
-    const summary = this.summary();
+          for (const game of games) {
+            this.ports.sql.exec(
+              "INSERT INTO games (game_id, game_index, status, has_llm, plan_json) VALUES (?, ?, 'queued', ?, ?)",
+              game.gameId,
+              game.gameIndex,
+              game.hasLlm ? 1 : 0,
+              encodePlan(game),
+            );
+          }
+        });
+        yield* this.pump();
+      }
 
-    if (summary === null) throw new Error(`Run ${runId} was not stored`);
+      const summary = this.summary();
 
-    return summary;
+      if (summary === null) return yield* new RunNotStored({ runId });
+
+      return summary;
+    });
   }
 
   /** GameDO → RunDO when a game ends. Idempotent per game. */
-  async gameFinished(outcome: GameOutcome): Promise<void> {
-    const changed = this.ports.sql.exec(
-      "UPDATE games SET status = 'done', outcome_json = ? WHERE game_id = ? AND status <> 'done' RETURNING game_id",
-      encodeOutcome(outcome),
-      outcome.gameId,
-    );
+  gameFinished(outcome: GameOutcome): Effect.Effect<void, UpstreamError> {
+    return Effect.gen({ self: this }, function* () {
+      const changed = this.ports.sql.exec(
+        "UPDATE games SET status = 'done', outcome_json = ? WHERE game_id = ? AND status <> 'done' RETURNING game_id",
+        encodeOutcome(outcome),
+        outcome.gameId,
+      );
 
-    if (changed.length === 0) return;
+      if (changed.length === 0) return;
 
-    await this.rate(outcome);
-    await this.pump();
+      yield* this.rate(outcome);
+      yield* this.pump();
+    });
   }
 
   /** GameDO → RunDO after every LLM wake. Idempotent per `key`. */
-  async charge(gameId: string, key: string, costUsd: number): Promise<ChargeResult> {
-    const run = this.run();
+  charge(gameId: string, key: string, costUsd: number): Effect.Effect<ChargeResult, UpstreamError> {
+    return Effect.gen({ self: this }, function* () {
+      const run = this.run();
 
-    if (run === undefined) return { exhausted: true };
+      if (run === undefined) return { exhausted: true };
 
-    const config = decodeConfig(run.config_json);
+      const config = decodeConfig(run.config_json);
 
-    const seen = queryFirst(
-      this.ports.sql,
-      CountRow,
-      "SELECT COUNT(*) AS n FROM charges WHERE key = ?",
-      key,
-    );
-
-    const outcome = charge(
-      { budgetUsd: config.budgetUsd, spentUsd: run.spent_usd },
-      (seen?.n ?? 0) > 0,
-      costUsd,
-    );
-
-    if (outcome.applied) {
-      this.ports.sql.transaction(() => {
-        this.ports.sql.exec(
-          "INSERT INTO charges (key, game_id, cost_usd) VALUES (?, ?, ?)",
-          key,
-          gameId,
-          costUsd,
-        );
-        this.ports.sql.exec("UPDATE run SET spent_usd = ? WHERE id = 1", outcome.budget.spentUsd);
-      });
-      await this.syncD1();
-    }
-
-    if (outcome.crossed) {
-      // SPEC §8: no new wakes once the budget is reached, and games that need them abort.
-      const running = this.games("running").filter(
-        (game) => game.has_llm === 1 && game.game_id !== gameId,
+      const seen = queryFirst(
+        this.ports.sql,
+        CountRow,
+        "SELECT COUNT(*) AS n FROM charges WHERE key = ?",
+        key,
       );
 
-      for (const game of running) {
-        await this.ports.games
-          .abort(game.game_id, "budget exhausted")
-          .catch((cause: unknown) => this.ports.log(`abort ${game.game_id} failed`, cause));
+      const outcome = charge(
+        { budgetUsd: config.budgetUsd, spentUsd: run.spent_usd },
+        (seen?.n ?? 0) > 0,
+        costUsd,
+      );
+
+      if (outcome.applied) {
+        this.ports.sql.transaction(() => {
+          this.ports.sql.exec(
+            "INSERT INTO charges (key, game_id, cost_usd) VALUES (?, ?, ?)",
+            key,
+            gameId,
+            costUsd,
+          );
+          this.ports.sql.exec("UPDATE run SET spent_usd = ? WHERE id = 1", outcome.budget.spentUsd);
+        });
+        yield* this.syncD1();
       }
 
-      await this.pump();
-    }
+      if (outcome.crossed) {
+        // SPEC §8: no new wakes once the budget is reached, and games that need them abort.
+        const running = this.games("running").filter(
+          (game) => game.has_llm === 1 && game.game_id !== gameId,
+        );
 
-    return { exhausted: isExhausted(outcome.budget) };
+        for (const game of running) {
+          yield* this.ports.games
+            .abort(game.game_id, "budget exhausted")
+            .pipe(Effect.catch((cause) => Effect.logError(`abort ${game.game_id} failed`, cause)));
+        }
+
+        yield* this.pump();
+      }
+
+      return { exhausted: isExhausted(outcome.budget) };
+    });
   }
 
   /**
@@ -281,31 +298,33 @@ export class RunCoordinator {
   }
 
   /** API → RunDO. Stops queued games and aborts running ones. */
-  async cancel(): Promise<RunSummary | null> {
-    const run = this.run();
+  cancel(): Effect.Effect<RunSummary | null, UpstreamError> {
+    return Effect.gen({ self: this }, function* () {
+      const run = this.run();
 
-    if (run === undefined) return null;
+      if (run === undefined) return null;
 
-    if (run.status === "running" || run.status === "queued") {
-      const queued = this.games("queued").map((game) => game.game_id);
-      const running = this.games("running").map((game) => game.game_id);
+      if (run.status === "running" || run.status === "queued") {
+        const queued = this.games("queued").map((game) => game.game_id);
+        const running = this.games("running").map((game) => game.game_id);
 
-      this.ports.sql.transaction(() => {
-        this.close("cancelled");
-        this.ports.sql.exec("UPDATE games SET status = 'skipped' WHERE status = 'queued'");
-      });
-      await this.ports.db.abortQueued(queued, this.iso());
+        this.ports.sql.transaction(() => {
+          this.close("cancelled");
+          this.ports.sql.exec("UPDATE games SET status = 'skipped' WHERE status = 'queued'");
+        });
+        yield* this.ports.db.abortQueued(queued, this.iso());
 
-      for (const gameId of running) {
-        await this.ports.games
-          .abort(gameId, "run cancelled")
-          .catch((cause: unknown) => this.ports.log(`abort ${gameId} failed`, cause));
+        for (const gameId of running) {
+          yield* this.ports.games
+            .abort(gameId, "run cancelled")
+            .pipe(Effect.catch((cause) => Effect.logError(`abort ${gameId} failed`, cause)));
+        }
+
+        yield* this.syncD1();
       }
 
-      await this.syncD1();
-    }
-
-    return this.summary();
+      return this.summary();
+    });
   }
 
   /**
@@ -313,38 +332,42 @@ export class RunCoordinator {
    * started game, then this object's own storage. Idempotent; a failure leaves this object's
    * storage in place, so retrying the deletion purges what is left.
    */
-  async purge(): Promise<void> {
-    if (this.run() === undefined) return;
+  purge(): Effect.Effect<void, UpstreamError> {
+    return Effect.gen({ self: this }, function* () {
+      if (this.run() === undefined) return;
 
-    this.ports.sql.transaction(() => {
-      this.close("cancelled");
-      this.ports.sql.exec("UPDATE games SET status = 'skipped' WHERE status = 'queued'");
-    });
+      this.ports.sql.transaction(() => {
+        this.close("cancelled");
+        this.ports.sql.exec("UPDATE games SET status = 'skipped' WHERE status = 'queued'");
+      });
 
-    const started = queryRows(
-      this.ports.sql,
-      PlanRow,
-      "SELECT plan_json FROM games WHERE status IN ('running', 'done') ORDER BY game_index",
-    ).map((row) => decodePlan(row.plan_json));
+      const started = queryRows(
+        this.ports.sql,
+        PlanRow,
+        "SELECT plan_json FROM games WHERE status IN ('running', 'done') ORDER BY game_index",
+      ).map((row) => decodePlan(row.plan_json));
 
-    for (const game of started) {
-      const llmSeats = game.seats.flatMap((seat) => (seat.kind === "llm" ? [seat.seat] : []));
+      for (const game of started) {
+        const llmSeats = game.seats.flatMap((seat) => (seat.kind === "llm" ? [seat.seat] : []));
 
-      await this.ports.games.purge(game.gameId, llmSeats);
-    }
-
-    this.ports.sql.transaction(() => {
-      for (const table of ["run", "games", "charges", "funding"]) {
-        this.ports.sql.exec(`DELETE FROM ${table}`);
+        yield* this.ports.games.purge(game.gameId, llmSeats);
       }
+
+      this.ports.sql.transaction(() => {
+        for (const table of ["run", "games", "charges", "funding"]) {
+          this.ports.sql.exec(`DELETE FROM ${table}`);
+        }
+      });
+      yield* this.ports.setAlarm(null);
     });
-    await this.ports.setAlarm(null);
   }
 
-  async alarm(): Promise<void> {
-    for (const row of this.unratedOutcomes()) await this.rate(decodeOutcome(row.outcome_json));
+  alarm(): Effect.Effect<void, UpstreamError> {
+    return Effect.gen({ self: this }, function* () {
+      for (const row of this.unratedOutcomes()) yield* this.rate(decodeOutcome(row.outcome_json));
 
-    await this.pump();
+      yield* this.pump();
+    });
   }
 
   summary(): RunSummary | null {
@@ -377,61 +400,74 @@ export class RunCoordinator {
   // ── internals ──────────────────────────────────────────────────────────────────────────
 
   /** Start queued games up to the concurrency limit; finish the run when nothing is left. */
-  private async pump(): Promise<void> {
-    const run = this.run();
+  private pump(): Effect.Effect<void, UpstreamError> {
+    return Effect.gen({ self: this }, function* () {
+      const run = this.run();
 
-    if (run === undefined || run.status !== "running") {
-      await this.settleAlarm();
+      if (run === undefined || run.status !== "running") {
+        yield* this.settleAlarm();
 
-      return;
-    }
-
-    const config = decodeConfig(run.config_json);
-    const budget = { budgetUsd: config.budgetUsd, spentUsd: run.spent_usd };
-    const concurrency = config.concurrency ?? DEFAULT_CONCURRENCY;
-    const starts: Array<PlannedGame> = [];
-    const skipped: Array<string> = [];
-    let running = this.games("running").length;
-
-    for (const game of this.games("queued")) {
-      if (running >= concurrency) break;
-
-      if (!mayRun(budget, game.has_llm === 1)) {
-        skipped.push(game.game_id);
-        this.ports.sql.exec("UPDATE games SET status = 'skipped' WHERE game_id = ?", game.game_id);
-        continue;
+        return;
       }
 
-      this.ports.sql.exec("UPDATE games SET status = 'running' WHERE game_id = ?", game.game_id);
-      starts.push(decodePlan(game.plan_json));
-      running += 1;
-    }
+      const config = decodeConfig(run.config_json);
+      const budget = { budgetUsd: config.budgetUsd, spentUsd: run.spent_usd };
+      const concurrency = config.concurrency ?? DEFAULT_CONCURRENCY;
+      const starts: Array<PlannedGame> = [];
+      const skipped: Array<string> = [];
+      let running = this.games("running").length;
 
-    if (skipped.length > 0) await this.ports.db.abortQueued(skipped, this.iso());
+      for (const game of this.games("queued")) {
+        if (running >= concurrency) break;
 
-    const listings = decodeListings(run.listings_json);
+        if (!mayRun(budget, game.has_llm === 1)) {
+          skipped.push(game.game_id);
+          this.ports.sql.exec(
+            "UPDATE games SET status = 'skipped' WHERE game_id = ?",
+            game.game_id,
+          );
+          continue;
+        }
 
-    for (const game of starts) {
-      try {
-        await this.ports.games.start(this.gameStart(run, config, listings, game));
-      } catch (cause) {
-        // Put it back in the queue; the watchdog alarm retries.
-        this.ports.log(`starting ${game.gameId} failed`, cause);
-        this.ports.sql.exec("UPDATE games SET status = 'queued' WHERE game_id = ?", game.gameId);
+        this.ports.sql.exec("UPDATE games SET status = 'running' WHERE game_id = ?", game.game_id);
+        starts.push(decodePlan(game.plan_json));
+        running += 1;
       }
-    }
 
-    const open = this.games("queued").length + this.games("running").length;
+      if (skipped.length > 0) yield* this.ports.db.abortQueued(skipped, this.iso());
 
-    if (open === 0) {
-      this.ports.sql.transaction(() => this.close("finished"));
-      await this.syncD1();
-      await this.settleAlarm();
+      const listings = decodeListings(run.listings_json);
 
-      return;
-    }
+      for (const game of starts) {
+        yield* this.ports.games.start(this.gameStart(run, config, listings, game)).pipe(
+          Effect.catch((cause) =>
+            // Put it back in the queue; the watchdog alarm retries.
+            Effect.logError(`starting ${game.gameId} failed`, cause).pipe(
+              Effect.andThen(
+                Effect.sync(() =>
+                  this.ports.sql.exec(
+                    "UPDATE games SET status = 'queued' WHERE game_id = ?",
+                    game.gameId,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      }
 
-    await this.ports.setAlarm(this.ports.now() + WATCHDOG_MS);
+      const open = this.games("queued").length + this.games("running").length;
+
+      if (open === 0) {
+        this.ports.sql.transaction(() => this.close("finished"));
+        yield* this.syncD1();
+        yield* this.settleAlarm();
+
+        return;
+      }
+
+      yield* this.ports.setAlarm(this.ports.now() + WATCHDOG_MS);
+    });
   }
 
   private gameStart(
@@ -458,42 +494,53 @@ export class RunCoordinator {
   }
 
   /** A closed run keeps an alarm only while finished games still wait for their rating. */
-  private async settleAlarm(): Promise<void> {
-    const unrated = this.unratedOutcomes().length > 0;
+  private settleAlarm(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      const unrated = this.unratedOutcomes().length > 0;
 
-    await this.ports.setAlarm(unrated ? this.ports.now() + RATING_RETRY_MS : null);
+      return this.ports.setAlarm(unrated ? this.ports.now() + RATING_RETRY_MS : null);
+    });
   }
 
-  private async rate(outcome: GameOutcome): Promise<void> {
-    if (outcome.status === "finished") {
-      try {
-        await this.ports.db.applyRatings({
-          gameId: outcome.gameId,
-          playersCount: outcome.playersCount,
-          at: outcome.finishedAt,
-          results: outcome.results,
-        });
-      } catch (cause) {
-        this.ports.log(`rating ${outcome.gameId} failed; the alarm retries`, cause);
-        await this.ports.setAlarm(this.ports.now() + RATING_RETRY_MS);
+  private rate(outcome: GameOutcome): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      if (outcome.status === "finished") {
+        const rated = yield* this.ports.db
+          .applyRatings({
+            gameId: outcome.gameId,
+            playersCount: outcome.playersCount,
+            at: outcome.finishedAt,
+            results: outcome.results,
+          })
+          .pipe(
+            Effect.as(true),
+            Effect.catch((cause) =>
+              Effect.logError(`rating ${outcome.gameId} failed; the alarm retries`, cause).pipe(
+                Effect.andThen(this.ports.setAlarm(this.ports.now() + RATING_RETRY_MS)),
+                Effect.as(false),
+              ),
+            ),
+          );
 
-        return;
+        if (!rated) return;
       }
-    }
 
-    this.ports.sql.exec("UPDATE games SET rated = 1 WHERE game_id = ?", outcome.gameId);
+      this.ports.sql.exec("UPDATE games SET rated = 1 WHERE game_id = ?", outcome.gameId);
+    });
   }
 
-  private async syncD1(): Promise<void> {
-    const run = this.run();
+  private syncD1(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      const run = this.run();
 
-    if (run === undefined) return;
+      if (run === undefined) return Effect.void;
 
-    try {
-      await this.ports.db.updateRun(run.run_id, run.status, run.spent_usd, run.finished_at);
-    } catch (cause) {
-      this.ports.log(`D1 updateRun failed for ${run.run_id}`, cause);
-    }
+      return this.ports.db
+        .updateRun(run.run_id, run.status, run.spent_usd, run.finished_at)
+        .pipe(
+          Effect.catch((cause) => Effect.logError(`D1 updateRun failed for ${run.run_id}`, cause)),
+        );
+    });
   }
 
   /**
