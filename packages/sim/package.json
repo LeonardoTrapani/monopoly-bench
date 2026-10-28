@@ -1,0 +1,14 @@
+{
+  "name": "@mb/sim",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@mb/bots": "workspace:*",
+    "@mb/engine": "workspace:*",
+    "effect": "4.0.0"
+  }
+}

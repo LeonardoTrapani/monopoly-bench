@@ -9,3 +9,6 @@ coverage/
 *.log
 .DS_Store
 /out/
+
+# local scratch scripts
+/.agent/
