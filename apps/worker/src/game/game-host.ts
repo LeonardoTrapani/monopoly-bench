@@ -6,7 +6,7 @@
  * spectators; writes summaries to D1; archives to R2 at the end; and notifies its RunDO.
  */
 import { isCommandTool, isToolArgs } from "@mb/agent";
-import { GameStatus, type LlmSeat, type Seat, type SeatActivity, WakeTranscript } from "@mb/api";
+import { GameStatus, type LlmSeat, Seat, type SeatActivity, WakeTranscript } from "@mb/api";
 import { Match, Result, Schema } from "effect";
 
 import {
@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS transcripts (
   seat TEXT NOT NULL, decision_id TEXT NOT NULL, at INTEGER NOT NULL, json TEXT NOT NULL,
   PRIMARY KEY (seat, decision_id)
 );
+CREATE TABLE IF NOT EXISTS stale_archives (seat TEXT PRIMARY KEY);
 `;
 
 const ValueRow = Schema.Struct({ value: Schema.String });
@@ -113,6 +114,8 @@ const SeqRow = Schema.Struct({ seq: Schema.NullOr(Schema.Int) });
 const TextRow = Schema.Struct({ text: Schema.String });
 
 const StatusRow = Schema.Struct({ status: Schema.String });
+
+const SeatRow = Schema.Struct({ seat: Seat });
 
 const DeadlineRow = Schema.Struct({
   seat: Schema.String,
@@ -302,14 +305,10 @@ export class GameHost<S, E extends EngineEvent, C> {
 
     if (charged.exhausted) this.setMeta("budgetExhausted", "1");
 
-    // The game was already archived (the last wake often reports after the game ends):
-    // refresh this seat's transcripts.
-    if (this.getMeta("finishedNotified") !== undefined) {
-      await this.ports.archive.put(
-        archiveKeys.seat(game.gameId, report.seat),
-        this.transcripts(report.seat),
-        "application/x-ndjson",
-      );
+    // Once the game stopped, its archive may already hold this seat's transcripts (the last
+    // wake often reports after the game ends): refresh it once the game is archived.
+    if (this.status() !== "running") {
+      this.ports.sql.exec("INSERT OR IGNORE INTO stale_archives (seat) VALUES (?)", report.seat);
     }
 
     // The wake ended without answering: apply the default now instead of at the deadline.
@@ -714,6 +713,7 @@ export class GameHost<S, E extends EngineEvent, C> {
       if (this.finishPending || this.status() !== "running") {
         this.flushSnapshot();
         await this.finish();
+        await this.refreshStaleArchives();
 
         return;
       }
@@ -924,7 +924,7 @@ export class GameHost<S, E extends EngineEvent, C> {
       return;
     }
 
-    if (this.finishPending) {
+    if (this.finishPending || this.staleArchives().length > 0) {
       await this.ports.setAlarm(this.ports.now() + FINISH_RETRY_MS);
 
       return;
@@ -940,6 +940,35 @@ export class GameHost<S, E extends EngineEvent, C> {
   }
 
   // ── the end of a game ─────────────────────────────────────────────────────────────────
+
+  private staleArchives() {
+    return queryRows(this.ports.sql, SeatRow, "SELECT seat FROM stale_archives");
+  }
+
+  /**
+   * Re-archive the transcripts of seats that reported after the game stopped. The mark is
+   * cleared before reading, so a report landing during the upload marks the seat again.
+   */
+  private async refreshStaleArchives(): Promise<void> {
+    const game = this.game;
+
+    if (game === undefined || this.getMeta("finishedNotified") === undefined) return;
+
+    for (const { seat } of this.staleArchives()) {
+      this.ports.sql.exec("DELETE FROM stale_archives WHERE seat = ?", seat);
+
+      try {
+        await this.ports.archive.put(
+          archiveKeys.seat(game.gameId, seat),
+          this.transcripts(seat),
+          "application/x-ndjson",
+        );
+      } catch (cause) {
+        this.ports.log(`Refreshing ${game.gameId}/${seat} transcripts failed; retrying`, cause);
+        this.ports.sql.exec("INSERT OR IGNORE INTO stale_archives (seat) VALUES (?)", seat);
+      }
+    }
+  }
 
   private async finish(): Promise<void> {
     const game = this.game;

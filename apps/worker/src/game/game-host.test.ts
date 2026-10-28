@@ -50,6 +50,8 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
   let alarmsRun = 0;
   const clock = { now: 1_000_000 };
   const failures = { recordWake: options.failRecordWake ?? 0, charge: options.failCharge ?? 0 };
+  /** Runs inside D1 `finish`, to deliver a report while the game is being archived. */
+  const hooks: { duringFinish: (() => Promise<void>) | null } = { duringFinish: null };
 
   const host = new GameHost(
     {
@@ -67,6 +69,7 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
         },
         finish: async (game) => {
           finishes.push(game);
+          await hooks.duringFinish?.();
         },
       },
       archive: {
@@ -179,6 +182,7 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
     drain,
     call,
     lastWake,
+    hooks,
     alarmsRun: () => alarmsRun,
   };
 };
@@ -482,28 +486,52 @@ describe("GameHost with the real engine", () => {
     expect(h.charges).toEqual([`g1:A:${wake.decisionId}`]);
   });
 
-  it("refreshes a seat's archived transcripts when its report arrives after the game ended (F4)", async () => {
-    const h = setup([llm("Opus"), random()], { maxRounds: 1 });
-
+  /** Every LLM decision runs out its deadline until the turn cap ends the game. */
+  const playToTurnCap = async (h: ReturnType<typeof setup>): Promise<void> => {
     await h.host.start(h.start);
     await h.drain();
 
-    // Every LLM decision runs out its deadline until the turn cap ends the game.
     for (let guard = 0; guard < 100 && h.outcomes.length === 0; guard += 1) {
       h.clock.now = h.lastWake().deadline + 1;
       await h.drain();
     }
 
     expect(h.outcomes).toHaveLength(1);
+  };
+
+  it("refreshes a seat's archived transcripts when its report arrives after the game ended (F4)", async () => {
+    const h = setup([llm("Opus"), random()], { maxRounds: 1 });
+
+    await playToTurnCap(h);
     expect(h.archive.get(archiveKeys.seat("g1", "A"))).toBe("");
 
     const late = h.lastWake();
 
     await h.host.wakeFinished(report(late));
+    await h.drain();
 
     expect(h.archive.get(archiveKeys.seat("g1", "A"))).toContain(
       `"decisionId":"${late.decisionId}"`,
     );
+  });
+
+  it("refreshes transcripts reported while the game was being archived (F4)", async () => {
+    const h = setup([llm("Opus"), random()], { maxRounds: 1 });
+    const reported: Array<string> = [];
+
+    h.hooks.duringFinish = async () => {
+      const late = h.lastWake();
+
+      reported.push(late.decisionId);
+      h.hooks.duringFinish = null;
+      await h.host.wakeFinished(report(late));
+    };
+
+    await playToTurnCap(h);
+    await h.drain();
+
+    expect(reported).toHaveLength(1);
+    expect(h.archive.get(archiveKeys.seat("g1", "A"))).toContain(`"decisionId":"${reported[0]}"`);
   });
 
   it("aborts the game instead of waking once the budget is exhausted", async () => {
