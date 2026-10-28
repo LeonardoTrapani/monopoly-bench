@@ -60,8 +60,8 @@ export const lineChart = <M>(h: HtmlBuilder<M>, config: LineChartConfig<M>): Htm
   const allPoints = config.series.flatMap((series) => series.points);
   const xs = allPoints.map(([x]) => x);
   const ys = allPoints.map(([, y]) => y);
-  const minX = Math.min(...xs, 0);
-  const maxX = Math.max(...xs, 1);
+  const minX = xs.length === 0 ? 0 : Math.min(...xs);
+  const maxX = xs.length === 0 ? 1 : Math.max(...xs, minX + 1);
   const maxY = Math.max(...ys, 1) * 1.05;
   const minY = Math.min(0, ...ys);
   const plotWidth = config.width - PADDING.left - PADDING.right;

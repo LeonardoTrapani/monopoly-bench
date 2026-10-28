@@ -80,7 +80,11 @@ export const header = (model: Model, h: HtmlBuilder<Message>): Html => {
     ],
     [
       h.div(
-        [h.Class("mx-auto flex max-w-7xl items-center gap-4 px-4 py-2.5 sm:px-6")],
+        [
+          h.Class(
+            "mx-auto flex max-w-7xl flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 sm:flex-nowrap sm:px-6",
+          ),
+        ],
         [
           h.a(
             [
@@ -92,7 +96,9 @@ export const header = (model: Model, h: HtmlBuilder<Message>): Html => {
           ),
           h.nav(
             [
-              h.Class("scroll-thin -my-1 flex flex-1 items-center gap-1 overflow-x-auto py-1"),
+              h.Class(
+                "scroll-thin order-last -mx-1 flex w-full items-center gap-1 overflow-x-auto px-1 py-1 sm:order-none sm:mx-0 sm:w-auto sm:flex-1 sm:px-0",
+              ),
               h.AriaLabel("Main"),
             ],
             [
@@ -123,7 +129,7 @@ export const header = (model: Model, h: HtmlBuilder<Message>): Html => {
             ],
           ),
           h.div(
-            [h.Class("flex shrink-0 items-center gap-2")],
+            [h.Class("ml-auto flex shrink-0 items-center gap-2")],
             [
               isMockMode
                 ? h.span(

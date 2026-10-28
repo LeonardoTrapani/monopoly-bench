@@ -176,7 +176,11 @@ const readyView = (
     [h.Class("space-y-6")],
     [
       h.div(
-        [h.Class("grid gap-6 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]")],
+        [
+          h.Class(
+            "grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]",
+          ),
+        ],
         [
           h.div(
             [h.Class("space-y-4")],
@@ -213,7 +217,11 @@ const readyView = (
         ],
       ),
       h.div(
-        [h.Class("grid gap-6 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]")],
+        [
+          h.Class(
+            "grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]",
+          ),
+        ],
         [
           h.div(
             [],
@@ -246,7 +254,11 @@ export const view = Submodel.defineView<Model, Message>((model, h) => {
       Timeline.match(model.timeline, {
         Loading: () =>
           h.div(
-            [h.Class("grid gap-6 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]")],
+            [
+              h.Class(
+                "grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]",
+              ),
+            ],
             [
               h.div([h.Class("deed aspect-square animate-pulse bg-board")]),
               loadingView(h, "Loading the game…", 6),

@@ -48,27 +48,25 @@
   --note: #1c2a1f;
 }
 
+/* The board keeps its classic light colors in every theme. */
+.board-light {
+  --paper: #fffdf8;
+  --paper-2: #f6f3e9;
+  --board: #cfe6cf;
+  --board-2: #bcdcbd;
+  --board-line: #1d2b1f;
+  --ink: #161b17;
+  --ink-2: #3b4a3e;
+  --muted: #667568;
+  --line: #d7dfd3;
+  --line-strong: #1b231c;
+  --shadow: rgba(22, 27, 23, 0.14);
+}
+
 @theme {
   --font-display: "Archivo Variable", "Arial Black", system-ui, sans-serif;
   --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
-
-  --color-page: var(--page);
-  --color-paper: var(--paper);
-  --color-paper-2: var(--paper-2);
-  --color-board: var(--board);
-  --color-board-2: var(--board-2);
-  --color-ink: var(--ink);
-  --color-ink-2: var(--ink-2);
-  --color-muted: var(--muted);
-  --color-line: var(--line);
-  --color-line-strong: var(--line-strong);
-  --color-red: var(--red);
-  --color-red-deep: var(--red-deep);
-  --color-money: var(--money);
-  --color-money-light: var(--money-light);
-  --color-note: var(--note);
-  --color-gold: var(--gold);
 
   --color-brown: #8a4b2a;
   --color-light-blue: #9fd8f4;
@@ -85,6 +83,26 @@
   --color-seat-d: #e9a21b;
   --color-seat-e: #8b4fd6;
   --color-seat-f: #12a3b5;
+}
+
+/* Inline so utilities read the variables directly and `.theme-dark` can swap them. */
+@theme inline {
+  --color-page: var(--page);
+  --color-paper: var(--paper);
+  --color-paper-2: var(--paper-2);
+  --color-board: var(--board);
+  --color-board-2: var(--board-2);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-red: var(--red);
+  --color-red-deep: var(--red-deep);
+  --color-money: var(--money);
+  --color-money-light: var(--money-light);
+  --color-note: var(--note);
+  --color-gold: var(--gold);
 }
 
 html {

@@ -871,7 +871,7 @@ export const view = Submodel.defineView<Model, Message, ViewInputs>((model, inpu
       h.section(
         [
           h.Class(
-            "mx-auto grid max-w-7xl gap-6 px-4 pt-12 pb-12 sm:px-6 lg:grid-cols-[1.35fr_1fr]",
+            "mx-auto grid max-w-7xl grid-cols-[minmax(0,1fr)] gap-6 px-4 pt-12 pb-12 sm:px-6 lg:grid-cols-[1.35fr_1fr]",
           ),
         ],
         [

@@ -301,7 +301,7 @@ const profileView = (profile: ModelProfile, h: HtmlBuilder<Message>): Html =>
         [sectionHeading(h, "Score = μ − 3σ per table size", "Ratings"), ratingsView(profile, h)],
       ),
       h.div(
-        [h.Class("grid gap-6 lg:grid-cols-[1.2fr_1fr]")],
+        [h.Class("grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[1.2fr_1fr]")],
         [
           deedCard(h, { kicker: "Over time", title: "Rating history" }, [historyView(profile, h)]),
           deedCard(h, { kicker: "How it plays", title: "Behavior" }, [behaviorView(profile, h)]),

@@ -37,6 +37,40 @@ const roundOf = (state: GameState): number | null => {
   );
 };
 
+/** Between decisions: the engine is applying a round, or live seats are still thinking. */
+const waitingView = <M>(
+  h: HtmlBuilder<M>,
+  state: GameState,
+  liveThinking: ReadonlyArray<Seat>,
+): Html =>
+  liveThinking.length === 0
+    ? h.p(
+        [h.Class("text-sm text-muted")],
+        [
+          state.control.stack.length === 0
+            ? `End of turn ${state.control.turn}: ${state.control.activeSeat} has moved; the next player is up.`
+            : "The engine is resolving the last actions.",
+        ],
+      )
+    : h.ul(
+        [h.Class("flex flex-wrap gap-2")],
+        liveThinking.map((seat) =>
+          h.keyed("li")(
+            seat,
+            [
+              h.Class(
+                "flex items-center gap-2 rounded-md border-[1.5px] border-red bg-red/5 px-2 py-1",
+              ),
+            ],
+            [
+              seatToken(h, seat, "sm"),
+              h.span([h.Class("text-xs font-semibold text-ink")], ["thinking"]),
+              h.span([h.Class("thinking-dots text-red")], [h.span([]), h.span([]), h.span([])]),
+            ],
+          ),
+        ),
+      );
+
 export const statusView = <M>(
   h: HtmlBuilder<M>,
   state: GameState,
@@ -84,7 +118,7 @@ export const statusView = <M>(
       ),
     Waiting: ({ requests }) =>
       requests.length === 0
-        ? h.p([h.Class("text-sm text-muted")], ["Resolving…"])
+        ? waitingView(h, state, liveThinking)
         : h.ul(
             [h.Class("flex flex-wrap gap-2")],
             requests.map((request) => {

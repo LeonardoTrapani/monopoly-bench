@@ -69,7 +69,7 @@ const playerCard = <M>(
     ],
     [
       h.div(
-        [h.Class("flex items-start gap-2.5")],
+        [h.Class("flex flex-wrap items-start gap-2.5")],
         [
           seatToken(h, player.seat, "md"),
           h.div(
@@ -87,11 +87,18 @@ const playerCard = <M>(
                     [player.label],
                   ),
                   player.competitorId.startsWith("bot:") ? botBadge(h) : h.empty,
+                  h.span(
+                    [
+                      h.Class("num shrink-0 text-[11px] font-bold text-muted"),
+                      h.Title("Current standing"),
+                    ],
+                    [ordinal(rank)],
+                  ),
                   isActive
                     ? h.span(
                         [
                           h.Class(
-                            "ml-auto shrink-0 rounded bg-red px-1.5 text-[10px] font-bold tracking-wider text-white uppercase",
+                            "shrink-0 rounded bg-red px-1.5 text-[10px] font-bold tracking-wider text-white uppercase",
                           ),
                         ],
                         ["Turn"],
@@ -112,33 +119,33 @@ const playerCard = <M>(
               ),
             ],
           ),
-          h.span(
-            [h.Class("num shrink-0 text-xs font-bold text-ink-2"), h.Title("Current standing")],
-            [ordinal(rank)],
-          ),
-        ],
-      ),
-      h.div(
-        [h.Class("mt-2 grid grid-cols-2 gap-2")],
-        [
           h.div(
-            [h.Class("banknote px-2 py-1")],
+            [h.Class("ml-auto flex shrink-0 gap-1.5")],
             [
-              h.p(
-                [h.Class("text-[10px] font-semibold tracking-wider text-money uppercase")],
-                ["Cash"],
+              h.div(
+                [h.Class("banknote min-w-[4.6rem] px-2 py-0.5 text-right")],
+                [
+                  h.p(
+                    [h.Class("text-[9px] font-semibold tracking-wider text-money uppercase")],
+                    ["Cash"],
+                  ),
+                  h.p([h.Class("num text-sm font-bold text-ink")], [money(player.cash)]),
+                ],
               ),
-              h.p([h.Class("num text-sm font-bold text-ink")], [money(player.cash)]),
-            ],
-          ),
-          h.div(
-            [h.Class("rounded-md border border-line bg-paper-2 px-2 py-1")],
-            [
-              h.p(
-                [h.Class("text-[10px] font-semibold tracking-wider text-muted uppercase")],
-                ["Net worth"],
+              h.div(
+                [
+                  h.Class(
+                    "min-w-[4.6rem] rounded-md border border-line bg-paper-2 px-2 py-0.5 text-right",
+                  ),
+                ],
+                [
+                  h.p(
+                    [h.Class("text-[9px] font-semibold tracking-wider text-muted uppercase")],
+                    ["Worth"],
+                  ),
+                  h.p([h.Class("num text-sm font-bold text-ink")], [money(worth)]),
+                ],
               ),
-              h.p([h.Class("num text-sm font-bold text-ink")], [money(worth)]),
             ],
           ),
         ],
@@ -201,7 +208,7 @@ export const playersView = <M>(
   const worths = worthsOf(state);
 
   return h.ul(
-    [h.Class("grid gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2")],
+    [h.Class("grid gap-2 md:grid-cols-2 lg:grid-cols-1")],
     state.players.map((player, index) =>
       playerCard(
         h,
