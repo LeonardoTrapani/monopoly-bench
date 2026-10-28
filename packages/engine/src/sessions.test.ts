@@ -1,3 +1,4 @@
+import { Predicate } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import { playerView, spectatorView } from "./views.ts";
@@ -16,6 +17,7 @@ import {
   topKind,
   withDeeds,
   withDice,
+  withPlayer,
 } from "./testing.ts";
 
 import type { Assets } from "./schema/common.ts";
@@ -276,6 +278,89 @@ describe("offers", () => {
     const timedOut = play(withDice(accepted, [1, 2]), answerFor(accepted, "A", "TimeoutSeat", {}));
 
     expect(eventsOf(timedOut.events, "MortgagedDeedDecided")[0]?.choice).toBe("keep");
+  });
+
+  describe("interest on mortgaged deeds received is reserved within a round (trades never open debts)", () => {
+    /** B and C each own a mortgaged brown street; A has $3, the interest on one of them. */
+    const setup = withPlayer(
+      withDeeds(
+        own(own(startGame(3), "B", ["mediterranean-avenue"]), "C", ["baltic-avenue"]),
+        ["mediterranean-avenue", "baltic-avenue"],
+        { mortgaged: true },
+      ),
+      "A",
+      { cash: 3 },
+    );
+
+    it("rejects a second acceptance whose interest the seat could no longer pay", () => {
+      const posted = closeRound(
+        play(
+          setup,
+          answerFor(setup, "B", "Offer", {
+            to: "A",
+            give: { ...NONE, properties: ["mediterranean-avenue"] },
+            get: NONE,
+          }),
+          answerFor(setup, "C", "Offer", {
+            to: "A",
+            give: { ...NONE, properties: ["baltic-avenue"] },
+            get: NONE,
+          }),
+        ).state,
+        "A",
+        "B",
+        "C",
+      ).state;
+
+      const first = play(posted, answerFor(posted, "A", "Accept", { offerId: 1 })).state;
+
+      expect(rejection(first, answerFor(first, "A", "Accept", { offerId: 2 }))).toContain(
+        "interest",
+      );
+    });
+
+    it("re-validates later acceptances against trades executed earlier in the round close", () => {
+      const posted = closeRound(
+        play(
+          setup,
+          answerFor(setup, "A", "Offer", {
+            to: "B",
+            give: NONE,
+            get: { ...NONE, properties: ["mediterranean-avenue"] },
+          }),
+          answerFor(setup, "C", "Offer", {
+            to: "A",
+            give: { ...NONE, properties: ["baltic-avenue"] },
+            get: NONE,
+          }),
+        ).state,
+        "A",
+        "B",
+        "C",
+      ).state;
+
+      const { state, events } = play(
+        withDice(posted, [1, 2]),
+        answerFor(posted, "A", "Accept", { offerId: 2 }),
+        answerFor(posted, "B", "Accept", { offerId: 1 }),
+        answerFor(posted, "A", "Done", {}),
+        answerFor(posted, "B", "Done", {}),
+        answerFor(posted, "C", "Done", {}),
+      );
+
+      expect(eventsOf(events, "TradeExecuted").map((trade) => trade.offerId)).toEqual([2]);
+      expect(eventsOf(events, "OfferInvalidated")[0]?.offerId).toBe(1);
+
+      const kept = play(
+        withDice(state, [1, 2]),
+        answerFor(state, "A", "KeepMortgage", { property: "baltic-avenue" }),
+      );
+
+      const pushed = eventsOf(kept.events, "FramePushed");
+
+      expect(pushed.some((event) => Predicate.isTagged(event.frame, "RaiseFunds"))).toBe(false);
+      expect(cash(kept.state, "A")).toBe(0);
+    });
   });
 
   it("limits new offers per round and comment length", () => {

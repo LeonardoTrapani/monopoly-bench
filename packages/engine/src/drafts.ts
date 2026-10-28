@@ -31,7 +31,7 @@ import type {
   WakeReason,
 } from "./schema/common.ts";
 import type { GameEvent } from "./schema/events.ts";
-import type { FrameOf, GameState, Offer } from "./schema/state.ts";
+import type { FrameOf, GameState, Offer, Task } from "./schema/state.ts";
 
 export type SessionFrame = FrameOf<"Table"> | FrameOf<"RaiseFunds">;
 
@@ -178,8 +178,36 @@ const sideProblem = (state: GameState, seat: Seat, assets: Assets): string | nul
     : null;
 };
 
-/** Why `seat` may not accept `offer` now, or null. */
-export const acceptProblem = (state: GameState, seat: Seat, offer: Offer): AcceptFailure | null => {
+/**
+ * Interest `seat` already owes on mortgaged deeds received by trades executed earlier
+ * in this round close (their `ResolveMortgaged` tasks are still queued).
+ */
+const reservedInterest = (state: GameState, pending: ReadonlyArray<Task>, seat: Seat): number => {
+  let total = 0;
+
+  for (const next of pending) {
+    if (!Predicate.isTagged(next, "ResolveMortgaged") || next.seat !== seat) continue;
+
+    for (const id of next.properties) {
+      const property = state.properties[propertyInfo(id).index];
+
+      if (property?.owner === seat && property.mortgaged) total += mortgageInterest(id);
+    }
+  }
+
+  return total;
+};
+
+/**
+ * Why `seat` may not accept `offer` now, or null. `pending` holds the tasks queued by
+ * trades executed earlier in the same round close, whose interest stays reserved.
+ */
+export const acceptProblem = (
+  state: GameState,
+  seat: Seat,
+  offer: Offer,
+  pending: ReadonlyArray<Task>,
+): AcceptFailure | null => {
   if (offer.status !== "open") return failure("the offer is no longer open", "offer");
 
   if (offer.from === seat) return failure("you cannot accept your own offer", "acceptor");
@@ -196,13 +224,21 @@ export const acceptProblem = (state: GameState, seat: Seat, offer: Offer): Accep
 
   if (acceptor !== null) return failure(acceptor, "acceptor");
 
-  const proposerCash = player(state, offer.from).cash - offer.give.cash + offer.get.cash;
+  const proposerCash =
+    player(state, offer.from).cash -
+    offer.give.cash +
+    offer.get.cash -
+    reservedInterest(state, pending, offer.from);
 
   if (proposerCash < interestOn(state, offer.get.properties)) {
     return failure(`${offer.from} could not pay the interest on mortgaged deeds`, "proposer");
   }
 
-  const acceptorCash = player(state, seat).cash - offer.get.cash + offer.give.cash;
+  const acceptorCash =
+    player(state, seat).cash -
+    offer.get.cash +
+    offer.give.cash -
+    reservedInterest(state, pending, seat);
 
   if (acceptorCash < interestOn(state, offer.give.properties)) {
     return failure("you could not pay the interest on the mortgaged deeds received", "acceptor");
@@ -273,18 +309,20 @@ const countDrafts = (
   ).length;
 
 /** State after applying `seat`'s own drafts of the current round (SPEC §4.3 step 2). */
-export const projectDrafts = (state: GameState, frame: SessionFrame, seat: Seat): GameState => {
-  const own = state.drafts.filter(
-    (draft) => draft.frame === frame.id && draft.round === frame.round && draft.seat === seat,
-  );
+export const projectDrafts = (state: GameState, frame: SessionFrame, seat: Seat): GameState =>
+  projectSandbox(state, frame, seat).state;
 
-  if (own.length === 0) return state;
-
+/** The projection with the tasks its drafts queued (e.g. interest owed on accepted deeds). */
+const projectSandbox = (state: GameState, frame: SessionFrame, seat: Seat): Machine => {
   const sandbox = new Machine(state);
 
-  for (const draft of own) applyDraft(sandbox, frame, draft.seat, draft.command, null);
+  for (const draft of state.drafts) {
+    if (draft.frame !== frame.id || draft.round !== frame.round || draft.seat !== seat) continue;
 
-  return sandbox.state;
+    applyDraft(sandbox, frame, draft.seat, draft.command, null);
+  }
+
+  return sandbox;
 };
 
 /** Reason a session draft is illegal now, or null (validated on the projected state). */
@@ -295,7 +333,8 @@ export const draftProblem = (
   command: DraftCommand,
 ): string | null => {
   const rules = state.config.rules;
-  const projected = projectDrafts(state, frame, seat);
+  const sandbox = projectSandbox(state, frame, seat);
+  const projected = sandbox.state;
 
   return DraftCommand.match(command, {
     Build: (build) => buildProblem(projected, seat, build.property),
@@ -311,7 +350,7 @@ export const draftProblem = (
 
       if (offer === undefined) return `offer ${accept.offerId} does not exist in this session`;
 
-      return acceptProblem(projected, seat, offer)?.reason ?? null;
+      return acceptProblem(projected, seat, offer, sandbox.queue)?.reason ?? null;
     },
     Reject: (reject) => rejectProblem(projected, frame, reject),
     Withdraw: (withdraw) => withdrawProblem(projected, frame, seat, withdraw.offerId),
@@ -513,7 +552,7 @@ export const applyDraft = (
         return drop(machine, frame, seat, command, `offer ${accept.offerId} does not exist`);
       }
 
-      const problem = acceptProblem(state, seat, offer);
+      const problem = acceptProblem(state, seat, offer, machine.queue);
 
       if (problem !== null) {
         return machine.emit("OfferInvalidated", {
