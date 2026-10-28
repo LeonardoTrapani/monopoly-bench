@@ -3,7 +3,7 @@
  * `GameHost`; spectators connect with hibernatable WebSockets (server → client only).
  */
 import { DurableObject } from "cloudflare:workers";
-import type { SeatActivity } from "@mb/api";
+import type { Seat, SeatActivity } from "@mb/api";
 
 import type { WorkerEnv } from "../../alchemy.run.ts";
 import type { GameStart, SeatCall, SeatCallResult, WakeReport } from "../contracts.ts";
@@ -100,6 +100,10 @@ export class GameDO extends DurableObject<WorkerEnv> {
     return this.host.eventsSince(since);
   }
 
+  transcripts(seat: Seat | null): string {
+    return this.host.transcripts(seat);
+  }
+
   override alarm(): Promise<void> {
     return this.host.alarm();
   }
@@ -115,8 +119,11 @@ export class GameDO extends DurableObject<WorkerEnv> {
     if (client === undefined || server === undefined)
       return new Response("WebSocket failed", { status: 500 });
 
+    // The Worker forwards `/api/games/<id>/ws`; the id names a game that has not started yet.
+    const gameId = decodeURIComponent(new URL(request.url).pathname.split("/")[3] ?? "");
+
     this.ctx.acceptWebSocket(server);
-    server.send(this.host.helloMessage());
+    server.send(this.host.helloMessage(gameId));
 
     return new Response(null, { status: 101, webSocket: client });
   }

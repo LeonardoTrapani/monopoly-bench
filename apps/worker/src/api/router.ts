@@ -18,6 +18,7 @@ import {
   RunDetail,
   RunsResponse,
   type RunSummary,
+  Seat,
 } from "@mb/api";
 import { Cause, Effect, Match, Option, Schema } from "effect";
 import { SqlClient } from "effect/sql";
@@ -50,6 +51,10 @@ export interface GamesGateway {
   readonly liveEvents: (gameId: string, since: number) => Promise<string>;
   /** `games/<id>/events.jsonl` from R2, or null when not archived. */
   readonly archivedEvents: (gameId: string) => Promise<string | null>;
+  /** NDJSON `WakeTranscript`s recorded so far by the game's Durable Object. */
+  readonly liveTranscripts: (gameId: string, seat: Seat | null) => Promise<string>;
+  /** `games/<id>/seats/<seat>.jsonl` from R2, or null when not archived. */
+  readonly archivedTranscripts: (gameId: string, seat: Seat) => Promise<string | null>;
   /** Forward a WebSocket upgrade to the game's Durable Object. */
   readonly spectate: (gameId: string, request: Request) => Promise<Response>;
 }
@@ -173,6 +178,40 @@ const gameEvents = Effect.fn("gameEvents")(function* (deps: ApiDeps, gameId: str
   );
 });
 
+const decodeSeat = Schema.decodeUnknownOption(Seat);
+
+/** Wake transcripts (reasoning, tool calls, usage), live from GameDO or archived in R2. */
+const gameTranscripts = Effect.fn("gameTranscripts")(function* (
+  deps: ApiDeps,
+  gameId: string,
+  url: URL,
+) {
+  const game = yield* getGame(gameId);
+
+  if (game === null) return errorJson(404, "Game not found");
+
+  const seatParam = url.searchParams.get("seat");
+  const seat = seatParam === null || seatParam === "" ? Option.some(null) : decodeSeat(seatParam);
+
+  if (Option.isNone(seat)) return errorJson(400, "seat must be a seat letter A-F");
+
+  if (game.status === "running" || game.status === "queued") {
+    return ndjson(yield* promise(() => deps.games.liveTranscripts(gameId, seat.value)));
+  }
+
+  const seats = seat.value === null ? game.seats.map((entry) => entry.seat) : [seat.value];
+
+  const files = yield* promise(() =>
+    Promise.all(seats.map((letter) => deps.games.archivedTranscripts(gameId, letter))),
+  );
+
+  if (files.some((file) => file === null)) {
+    return ndjson(yield* promise(() => deps.games.liveTranscripts(gameId, seat.value)));
+  }
+
+  return ndjson(files.join(""));
+});
+
 const SeqOnly = Schema.fromJsonString(Schema.Struct({ seq: Schema.Number }));
 
 const decodeSeq = Schema.decodeUnknownOption(SeqOnly);
@@ -275,6 +314,10 @@ const route = (
 
     if (parts.length === 3 && id !== undefined && action === "events")
       return gameEvents(deps, id, url);
+
+    if (parts.length === 3 && id !== undefined && action === "transcripts") {
+      return gameTranscripts(deps, id, url);
+    }
 
     if (parts.length === 3 && id !== undefined && action === "ws") {
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {

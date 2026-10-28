@@ -373,7 +373,9 @@ export const models = Effect.fn("models")(function* (catalog: ReadonlyArray<Mode
   const sql = yield* SqlClient.SqlClient;
 
   const rows = yield* decodeRows(CompetitorRow)(sql`
-    SELECT s.competitor_id, MAX(s.label) AS label, MAX(s.kind) AS kind, COUNT(DISTINCT s.game_id) AS games
+    SELECT s.competitor_id,
+      COALESCE((SELECT r.label FROM ratings r WHERE r.competitor_id = s.competitor_id LIMIT 1), MAX(s.label)) AS label,
+      MAX(s.kind) AS kind, COUNT(DISTINCT s.game_id) AS games
     FROM seats s JOIN games g ON g.id = s.game_id
     WHERE g.status = 'finished'
     GROUP BY s.competitor_id

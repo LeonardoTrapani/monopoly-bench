@@ -112,6 +112,8 @@ const SeqRow = Schema.Struct({ seq: Schema.NullOr(Schema.Int) });
 
 const TextRow = Schema.Struct({ text: Schema.String });
 
+const StatusRow = Schema.Struct({ status: Schema.String });
+
 const DeadlineRow = Schema.Struct({
   seat: Schema.String,
   decision_id: Schema.String,
@@ -230,18 +232,20 @@ export class GameHost<S, E extends EngineEvent, C> {
 
     if (game === undefined) return;
 
-    const seen = queryFirst(
+    // Done only once the last step below ran: a report retried after a crash half-way through
+    // redoes the missing steps, all of which are idempotent.
+    const processed = queryFirst(
       this.ports.sql,
-      JsonRow,
-      "SELECT json FROM transcripts WHERE seat = ? AND decision_id = ?",
+      StatusRow,
+      "SELECT status FROM decisions WHERE seat = ? AND decision_id = ?",
       report.seat,
       report.decisionId,
     );
 
-    if (seen !== undefined) return;
+    if (processed?.status === "reported") return;
 
     this.ports.sql.exec(
-      "INSERT INTO transcripts (seat, decision_id, at, json) VALUES (?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO transcripts (seat, decision_id, at, json) VALUES (?, ?, ?, ?)",
       report.seat,
       report.decisionId,
       this.ports.now(),
@@ -269,7 +273,8 @@ export class GameHost<S, E extends EngineEvent, C> {
         costUsd: transcript.usage.costUsd,
         toolCalls: transcript.toolCalls.length,
         invalidActions: transcript.invalidActions,
-        timedOut: transcript.timedOut,
+        // A report arriving after GameDO's deadline is a timeout too.
+        timedOut: transcript.timedOut || processed?.status === "expired",
         endReason: report.endReason,
       });
     } catch (cause) {
@@ -339,12 +344,28 @@ export class GameHost<S, E extends EngineEvent, C> {
     return rows.map((row) => `${row.json}\n`).join("");
   }
 
-  helloMessage(): string {
+  /** Wake transcripts recorded so far (one `WakeTranscript` per line), for one seat or all. */
+  transcripts(seat: Seat | null): string {
+    const rows =
+      seat === null
+        ? queryRows(this.ports.sql, JsonRow, "SELECT json FROM transcripts ORDER BY at, seat")
+        : queryRows(
+            this.ports.sql,
+            JsonRow,
+            "SELECT json FROM transcripts WHERE seat = ? ORDER BY at",
+            seat,
+          );
+
+    return rows.map((row) => `${encodeTranscript(decodeTranscript(row.json))}\n`).join("");
+  }
+
+  /** `gameId` names the game for spectators who connect before it starts. */
+  helloMessage(gameId: string): string {
     const view = this.state === undefined ? null : this.binding.engine.spectatorView(this.state);
 
     return encodeSpectatorMessage(
       SpectatorMessage.cases.Hello.make({
-        gameId: this.game?.gameId ?? "",
+        gameId: this.game?.gameId ?? gameId,
         status: this.status(),
         lastSeq: this.lastSeq(),
         view,

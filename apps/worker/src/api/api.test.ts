@@ -98,6 +98,8 @@ const setup = () => {
     games: {
       liveEvents: async () => '{"seq":1}\n',
       archivedEvents: async (gameId) => archive.get(gameId) ?? null,
+      liveTranscripts: async () => "",
+      archivedTranscripts: async (gameId, seat) => `{"gameId":"${gameId}","seat":"${seat}"}\n`,
       spectate: async () => new Response(null, { status: 204 }),
     },
     listings: async () => [],
@@ -448,6 +450,14 @@ describe("HTTP API", () => {
     expect(await events.text()).toBe('{"seq":2}\n{"seq":3}\n');
     expect((await h.call("GET", `/api/games/${gameId}/events?since=x`)).status).toBe(400);
     expect((await h.call("GET", `/api/games/${gameId}/ws`)).status).toBe(426);
+
+    const transcripts = await h.call("GET", `/api/games/${gameId}/transcripts?seat=B`);
+
+    expect(await transcripts.text()).toBe(`{"gameId":"${gameId}","seat":"B"}\n`);
+    expect(
+      (await (await h.call("GET", `/api/games/${gameId}/transcripts`)).text()).split("\n"),
+    ).toHaveLength(3);
+    expect((await h.call("GET", `/api/games/${gameId}/transcripts?seat=Z`)).status).toBe(400);
   });
 
   it("cancels a run with the API key", async () => {

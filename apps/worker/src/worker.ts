@@ -34,6 +34,12 @@ const apiDeps = (env: WorkerEnv): ApiDeps => ({
 
       return object === null ? null : object.text();
     },
+    liveTranscripts: (gameId, seat) => env.GAMES.getByName(gameId).transcripts(seat),
+    archivedTranscripts: async (gameId, seat) => {
+      const object = await env.ARCHIVE.get(archiveKeys.seat(gameId, seat));
+
+      return object === null ? null : object.text();
+    },
     spectate: (gameId, request) => env.GAMES.getByName(gameId).fetch(request),
   },
   listings: (modelIds) => fetchListings(modelIds, fetch, Date.now()),

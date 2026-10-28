@@ -332,6 +332,9 @@ describe("GameHost", () => {
     await h.drain();
 
     expect(h.wakeRows).toHaveLength(1);
+    expect(h.host.transcripts("A").trim().split("\n")).toHaveLength(1);
+    expect(h.host.transcripts(null)).toContain('"decisionId":"1.1.A"');
+    expect(h.host.transcripts("B")).toBe("");
     expect(h.wakeRows[0]).toMatchObject({
       seat: "A",
       costUsd: 0.25,
@@ -351,6 +354,39 @@ describe("GameHost", () => {
     const seats = h.archive.get(archiveKeys.seat("g1", "A")) ?? "";
     expect(seats.trim().split("\n")).toHaveLength(1);
     expect(seats).toContain('"decisionId":"1.1.A"');
+  });
+
+  it("finishes a wake report that a crash cut off half-way", async () => {
+    const h = setup([llm("Opus"), bot()]);
+
+    await h.host.start(h.start);
+    await h.drain();
+
+    const wake = h.wakes[0];
+
+    if (wake === undefined) throw new Error("no wake");
+
+    // A previous attempt stored the transcript, then the object was reset.
+    h.sql.exec(
+      "INSERT INTO transcripts (seat, decision_id, at, json) VALUES (?, ?, ?, ?)",
+      wake.seat,
+      wake.decisionId,
+      1,
+      "{}",
+    );
+    await h.host.wakeFinished({
+      gameId: wake.gameId,
+      seat: wake.seat,
+      decisionId: wake.decisionId,
+      transcript: transcriptFor(wake),
+      latencyMs: 10,
+      endReason: "unanswered",
+    });
+    await h.drain();
+
+    expect(h.wakeRows).toHaveLength(1);
+    expect(h.charges).toEqual(["g1:A:1.1.A"]);
+    expect(h.wakes[1]?.decisionId).toBe("2.1.A");
   });
 
   it("aborts the game instead of waking once the budget is exhausted", async () => {
@@ -385,7 +421,7 @@ describe("GameHost", () => {
     await h.host.start(h.start);
     await h.drain();
 
-    const hello = decodeMessage(h.host.helloMessage());
+    const hello = decodeMessage(h.host.helloMessage("g1"));
     expect(
       SpectatorMessage.guards.Hello(hello) && hello.lastSeq > 0 && hello.status === "running",
     ).toBe(true);
