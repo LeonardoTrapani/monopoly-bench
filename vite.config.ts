@@ -9,6 +9,35 @@ const agentDirs = [
   "tools/oxlint/anti-slop/**",
 ];
 
+/** `@foldkit/oxlint-plugin` recommended rules, applied to `apps/web` only. */
+const foldkitRules = {
+  "foldkit/command-binding-matches-name": "error",
+  "foldkit/command-define-pascal-const": "error",
+  "foldkit/got-prefix-requires-submodel-payload": "error",
+  "foldkit/got-submodel-message-name": "error",
+  "foldkit/keyed-required-for-mapped-rows": "error",
+  "foldkit/no-array-index-view-keys": "error",
+  "foldkit/no-child-message-construction-in-root": "error",
+  "foldkit/no-direct-submodel-state-update": "error",
+  "foldkit/no-disabling-dev-guardrails": "error",
+  "foldkit/no-empty-children-array": "error",
+  "foldkit/no-empty-commands-array": "error",
+  "foldkit/no-empty-object-tagged-call": "error",
+  "foldkit/no-hand-rolled-command-struct": "error",
+  "foldkit/no-hardcoded-route-strings": "error",
+  "foldkit/no-impure-call-at-decision-time": "error",
+  "foldkit/no-module-level-mutable-state": "error",
+  "foldkit/no-noop-message": "error",
+  "foldkit/no-raw-dom-event-attributes": "error",
+  "foldkit/no-spread-in-modify-fields": "error",
+  "foldkit/no-switch-on-message-tag": "error",
+  "foldkit/prefer-callable-message-constructor": "error",
+  "foldkit/prefer-command-mapmessage": "error",
+  "foldkit/require-fold-for-child-update-result": "error",
+  "foldkit/require-rel-for-external-link": "error",
+  "foldkit/wrap-child-output-in-got-message": "error",
+} as const;
+
 export default defineConfig({
   lint: {
     ignorePatterns: [...agentDirs, "**/dist/**", "**/.alchemy/**", "**/.wrangler/**"],
@@ -47,6 +76,21 @@ export default defineConfig({
       "anti-slop-effect/no-service-constructor-imports": "error",
       "anti-slop-effect/prefer-effect-match": "error",
     },
+    overrides: [
+      {
+        // Foldkit's own rules for the web app (Elm-architecture conventions); not for the mock
+        // API, which simulates a server, nor for tests.
+        files: ["apps/web/src/**/*.ts"],
+        excludeFiles: ["apps/web/src/mock/**", "apps/web/src/**/*.test.ts"],
+        jsPlugins: [
+          {
+            name: "foldkit",
+            specifier: "./apps/web/node_modules/@foldkit/oxlint-plugin/dist/index.js",
+          },
+        ],
+        rules: foldkitRules,
+      },
+    ],
   },
   fmt: {
     ignorePatterns: [...agentDirs, "**/dist/**", "bun.lock"],
