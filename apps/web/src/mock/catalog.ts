@@ -215,6 +215,7 @@ export const MOCK_CATALOG_MODELS: ReadonlyArray<ModelCatalogEntry> = [
     null,
   ]),
   entry("inflection/inflection-4", "Inflection 4", "Inflection", false, 32_000, null),
+  entry("typesafe/jev-router", "Jev Router", "TypeSafe", true, 1_000_000, null),
 ];
 
 export const MOCK_CATALOG: CatalogResponse = {

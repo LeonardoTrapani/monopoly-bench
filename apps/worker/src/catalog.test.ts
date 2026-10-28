@@ -115,14 +115,14 @@ describe("model catalog", () => {
     expect(runModelProblem(live, "moondream/moondream3-preview")).toContain(
       "does not support tool calling",
     );
-    expect(runModelProblem(live, "openrouter/auto")).toContain("no fixed price");
+    expect(runModelProblem(live, "openrouter/auto")).toBeNull();
     expect(runModelProblem(live, "nobody/nothing")).toContain("is not in the catalog");
 
     const bundled = bundledSnapshot("now");
 
     expect(runModelProblem(bundled, "anthropic/claude-haiku-5.5")).toBeNull();
     expect(runModelProblem(bundled, "nobody/nothing")).toContain("is not in the catalog");
-    expect(runModelProblem(bundled, "openrouter/auto")).toContain("no fixed price");
+    expect(runModelProblem(bundled, "openrouter/auto")).toBeNull();
   });
 
   it("refuses models whose context window cannot hold a seat (F5)", () => {

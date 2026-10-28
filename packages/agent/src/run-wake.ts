@@ -48,7 +48,7 @@ import {
   type ToolName,
   type ToolParameters,
 } from "./tools.ts";
-import { addResponseUsage, EMPTY_USAGE, sumUsage } from "./usage.ts";
+import { addResponseUsage, EMPTY_USAGE, sumUsage, withReportedCost } from "./usage.ts";
 import { NUDGE_MESSAGE } from "./wake-message.ts";
 
 export interface WakeIdentity {
@@ -331,10 +331,11 @@ const play = async (
       tools,
       messages: [...conversation.messages],
     },
-    streamFn:
+    streamFn: withReportedCost(
       maxTokens === undefined
         ? input.streamFn
         : (model, context, options) => input.streamFn(model, context, { ...options, maxTokens }),
+    ),
     getApiKey: () => input.apiKey,
     toolExecution: "sequential",
     identity: { attribution: null },

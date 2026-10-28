@@ -10,6 +10,8 @@
 import {
   BotSeat,
   CatalogResponse,
+  competitorId,
+  competitorName,
   CreateRunResponse,
   GameSummary,
   GamesResponse,
@@ -40,7 +42,14 @@ import {
   models,
 } from "../db/queries.ts";
 import { recomputeRatings } from "../db/ratings-store.ts";
-import { deleteRunGames, deleteRunRow, runGameIds, runPlayersCount } from "../db/writes.ts";
+import {
+  type CompetitorName,
+  deleteRunGames,
+  deleteRunRow,
+  runGameIds,
+  runPlayersCount,
+  saveCompetitorNames,
+} from "../db/writes.ts";
 import type { KeyCheck } from "../openrouter-key.ts";
 import { isAuthorized, sha256Hex } from "./auth.ts";
 import { errorJson, json, jsonText, ndjson, noContent, preflight } from "./http.ts";
@@ -191,6 +200,19 @@ const checkOwnKey = Effect.fn("checkOwnKey")(function* (
   }
 });
 
+/** Leaderboard names of a run's competitors, from its catalog snapshot (not its seat labels). */
+const competitorNames = (
+  config: RunConfig,
+  snapshot: CatalogSnapshot,
+): ReadonlyArray<CompetitorName> =>
+  config.players.flatMap((seat) => {
+    const entry = snapshot.catalog.models.find((model) => model.model === seat.model);
+
+    return entry === undefined
+      ? []
+      : [{ competitorId: competitorId(seat), name: competitorName(entry.label, seat) }];
+  });
+
 const createRun = Effect.fn("createRun")(function* (request: Request, deps: ApiDeps) {
   const ownKey = header(request, OWN_KEY_HEADER);
 
@@ -234,13 +256,15 @@ const createRun = Effect.fn("createRun")(function* (request: Request, deps: ApiD
     return listing === undefined ? [] : [listing];
   });
 
+  if (ownKey !== null) yield* checkOwnKey(deps, ownKey, config.budgetUsd);
+
+  yield* saveCompetitorNames(competitorNames(config, snapshot));
+
   if (ownKey === null) {
     const run = yield* promise(() => deps.runs.create(deps.newRunId(), config, listings, null));
 
     return json(CreateRunResponse, { run, cancelToken: null }, 201);
   }
-
-  yield* checkOwnKey(deps, ownKey, config.budgetUsd);
 
   const cancelToken = deps.newCancelToken();
   const cancelTokenSha256 = yield* promise(() => sha256Hex(cancelToken));

@@ -505,7 +505,7 @@ const REASONING_OPTIONS: ReadonlyArray<readonly [string, string]> = [
 
 /** `≈ $3.56`: the catalog's rough cost of one seat in a full 4-player game. */
 const seatCostText = (entry: ModelCatalogEntry): string => {
-  if (entry.estimatedSeatCostUsd === null) return "no price";
+  if (entry.estimatedSeatCostUsd === null) return "variable price";
 
   return entry.estimatedSeatCostUsd === 0 ? "free" : `≈ ${usd(entry.estimatedSeatCostUsd)}`;
 };
@@ -527,7 +527,7 @@ const modelFacts = (h: HtmlBuilder<Message>, entry: ModelCatalogEntry): Readonly
     ? h.empty
     : h.span([h.Title("Context window")], [`${contextWindow(entry.contextLength)} ctx`]),
   entry.pricing === null
-    ? h.span([], ["no pricing"])
+    ? h.span([h.Title("A router: billed at the price of the model it picks")], ["variable price"])
     : h.span(
         [h.Class("num"), h.Title("USD per million tokens: input / output")],
         [
@@ -856,7 +856,7 @@ const seatCard = (
               h.input([
                 h.Class(INPUT),
                 h.Value(seat.label),
-                h.Placeholder("Shown on the leaderboard"),
+                h.Placeholder("Shown in this run's games"),
                 h.OnInput((value) => Message.UpdatedSeatLabel({ seatId, value })),
               ]),
             ],
@@ -997,7 +997,7 @@ const gamesSection = (model: Model, errors: ReadonlyArray<FieldError>, h: HtmlBu
         label: "Seeds",
         value: model.form.seeds,
         placeholder: "1",
-        hint: `${integer(games)} games = seeds × ${model.form.seats.length} seats.`,
+        hint: `Each seed is played once per seating order, so every model plays from every seat with the same dice and cards: ${integer(games)} games = seeds × ${model.form.seats.length} seating orders.`,
         errors: errorsFor(errors, "seeds"),
         onInput: (value) => Message.UpdatedSeeds({ value }),
       }),
@@ -1098,7 +1098,7 @@ const estimateView = (model: Model, h: HtmlBuilder<Message>): Html =>
                 ? h.p(
                     [],
                     [
-                      `${estimate.unpricedSeats} seat${estimate.unpricedSeats === 1 ? " has" : "s have"} no OpenRouter price and ${estimate.unpricedSeats === 1 ? "is" : "are"} not counted.`,
+                      `${estimate.unpricedSeats} seat${estimate.unpricedSeats === 1 ? " plays a router" : "s play routers"} with a variable price, not counted here; the budget still caps what OpenRouter charges for ${estimate.unpricedSeats === 1 ? "it" : "them"}.`,
                     ],
                   )
                 : h.empty,
@@ -1243,7 +1243,7 @@ export const view = Submodel.defineView<Model, Message>((model, h) => {
           h.p(
             [h.Class("mt-2 max-w-3xl text-sm text-ink-2")],
             [
-              "Pick 2–6 models from OpenRouter's catalog. A run plays every seed once per seat rotation, so each model sits in every chair with the same dice and decks, and the results feed the public leaderboard. Pay with your own OpenRouter key, or with server credit if you hold the bench API key. ",
+              "Pick 2–6 models from OpenRouter's catalog. A run plays every seed once per seating order (4 models: 4 games per seed), so each model sits in every chair with the same dice and decks, and the results feed the public leaderboard. Pay with your own OpenRouter key, or with server credit if you hold the bench API key. ",
               h.a(
                 [h.Href(aboutRouter()), h.Class("font-semibold text-ink underline")],
                 ["How runs are rated"],
@@ -1266,7 +1266,7 @@ export const view = Submodel.defineView<Model, Message>((model, h) => {
               h.p(
                 [h.Class("text-sm text-ink-2")],
                 [
-                  `${integer(games)} games · ${model.form.seats.length} seats · ${model.form.funding === "ownKey" ? "paid with your OpenRouter key" : "paid with server credit"}`,
+                  `${integer(games)} games (seeds × ${model.form.seats.length} seating orders) · ${model.form.funding === "ownKey" ? "paid with your OpenRouter key" : "paid with server credit"}`,
                 ],
               ),
               Submission.match(model.submission, {

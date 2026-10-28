@@ -443,7 +443,7 @@ describe("start-a-run view", () => {
       { update, view },
       Scene.given(loaded(validForm)),
       ...acknowledgePickers(2),
-      Scene.expect(Scene.text("8 games = seeds × 2 seats.")).toExist(),
+      Scene.expect(Scene.text(/8 games = seeds × 2 seating orders\./)).toExist(),
       Scene.expect(Scene.text(`≈ ${usd(estimate.totalUsd)}`)).toExist(),
       Scene.expect(Scene.text(/budget \(\$12\.50\) is the hard cap/)).toExist(),
       Scene.expect(Scene.text(/estimate is above the budget/)).toExist(),

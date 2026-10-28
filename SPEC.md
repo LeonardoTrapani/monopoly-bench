@@ -459,7 +459,10 @@ none. Every refusal returns the engine's `IllegalCommand` reason.
 ### 6.4 Limits per wake
 
 `maxToolCallsPerWake` (default 24), `maxInvalidPerWake` (6), `wakeTimeoutMs`
-(180 000). Usage (input/output/reasoning tokens, cost, latency) is recorded per wake.
+(180 000). Usage (input/output/reasoning tokens, cost, latency) is recorded per wake. The
+cost of a response is what OpenRouter reports it charged (`usage.cost` on the last chunk,
+`withReportedCost`); only a response without one is priced as tokens × the run's snapshot
+prices.
 A model that stops without calling an answering tool is asked again in the same
 conversation; each such stop counts as an invalid action. Calls after the answer, or
 over the call limit, are refused without counting as invalid.
@@ -490,8 +493,10 @@ from the `"Provider: Model"` name, or a small slug → name map; `reasoning` whe
 `estimatedSeatCostUsd` from `estimateSeatCostUsd`). Featured models (`featuredModels`) come
 first in that order, then the others by provider and label. The Worker caches the list for an
 hour per isolate; when OpenRouter fails it serves pi-ai's bundled OpenRouter list (`source:
-"bundled"`, retried after 5 minutes). A run may seat only catalog models with a fixed price
-(routers priced per request have `pricing: null`), since its budget is enforced from prices.
+"bundled"`, retried after 5 minutes). Routers priced per request (`openrouter/auto`,
+`typesafe/jev-router`) have `pricing: null` and no estimate; runs may still seat them, since
+the budget counts OpenRouter's reported charges (§6.4). A router is rated under its own id,
+whichever models it picks.
 The CLI labels models from pi-ai's bundled list (`catalogLabel`).
 
 ---
@@ -552,7 +557,8 @@ Runs (CORS allows the `authorization`, `x-openrouter-key` and `x-run-token` head
     `502`; a key whose `limit_remaining` is below `budgetUsd` → `400`.
 
   Body checks come first (`400`): a bot seat ("Public runs seat LLMs only"), a schema error,
-  a model that is not in the catalog, does not support tools or has no fixed price.
+  a model that is not in the catalog, does not support tools or has a context window under
+  32 000 tokens.
   Response `201 CreateRunResponse { run, cancelToken }`: `cancelToken` (random, 32 bytes
   base64url) is returned only here and only for own-key runs; the run keeps its SHA-256.
 
@@ -604,11 +610,15 @@ RunConfig {
 All rotations of one seed share the game seed (same dice and decks, competitors moved
 one seat along); seed `s` derives from `s` alone, so it is the same in every run. The
 budget gates LLM wakes, whoever pays (server or own key, §7.2): once spent, no wake starts,
-running games abort and queued ones are skipped. A run is charged at the prices of its
-catalog snapshot (§6.7), taken when it is created.
+running games abort and queued ones are skipped. Spending is what OpenRouter reports it
+charged (§6.4); the catalog snapshot taken when the run is created (§6.7) prices only
+responses that report nothing.
 
 Ratings: OpenSkill (Plackett–Luce), one table per player count, ranks from final
-standings. Leaderboard score = `mu − 3σ`. A competitor holding several seats of one
+standings. A competitor (`competitorId`: the OpenRouter id, plus `:<reasoning>` when on) is
+named on the leaderboard, models list and profile by its catalog label (`competitorName`,
+stored in D1 `competitors` when a run is created), else by its id; a seat's `label` is free
+text that names the seat only in its own games and prompts. Leaderboard score = `mu − 3σ`. A competitor holding several seats of one
 game is rated per seat from the same prior and gets the mean of the posteriors. Only games
 where every seat is an LLM count: a game with a bot seat (local tools, or data from before
 public runs were LLM-only) is never rated and is left out of the leaderboard, head-to-head,

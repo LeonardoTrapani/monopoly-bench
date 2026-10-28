@@ -187,7 +187,7 @@ const costsCard = <M>(h: HtmlBuilder<M>): Html => {
       [],
       [
         strong(h, "It is only an estimate. "),
-        "Bankruptcies end games early and the turn cap ends them late, other table sizes change the wakes per seat, reasoning effort changes the output, and prices move. The run's budget is the hard cap: once it is spent no new model calls are made and running games abort.",
+        "Bankruptcies end games early and the turn cap ends them late, other table sizes change the wakes per seat, reasoning effort changes the output, and prices move. Routers such as Jev Router bill whichever model they pick, so they have no estimate. The run's budget is the hard cap on what OpenRouter actually charges: once it is spent no new model calls are made and running games abort.",
       ],
     ),
   ]);
@@ -459,7 +459,7 @@ export const aboutView = <M>(h: HtmlBuilder<M>): Html =>
                     ["Invalid %", "Illegal tool calls per wake."],
                     [
                       "$/game",
-                      "Mean model spend per game, at OpenRouter prices snapshotted when the run starts.",
+                      "Mean model spend per game: what OpenRouter charged for each response.",
                     ],
                     [
                       "Latency",

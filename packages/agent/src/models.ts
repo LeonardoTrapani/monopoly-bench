@@ -57,7 +57,8 @@ export const openRouterFallbackModel = (
 
 /**
  * Resolve an OpenRouter model id. A `listing` (from the public model list) overrides the
- * catalog's price, so a run is charged at the prices it was created with.
+ * catalog's price, so a run prices its responses at the prices it was created with whenever
+ * OpenRouter reports no charge (`withReportedCost`).
  */
 export const resolveOpenRouterModel = (
   models: MutableModels,

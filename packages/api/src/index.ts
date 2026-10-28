@@ -72,6 +72,15 @@ export const competitorId = (seat: SeatSpec): string =>
         : `${llm.model}:${llm.reasoning}`,
   });
 
+/**
+ * Leaderboard name of an LLM competitor: its catalog label, plus the reasoning effort when on.
+ * Seat labels never reach the leaderboard; they name a seat only in its own games.
+ */
+export const competitorName = (catalogLabel: string, seat: LlmSeat): string =>
+  seat.reasoning === undefined || seat.reasoning === "off"
+    ? catalogLabel
+    : `${catalogLabel} · reasoning ${seat.reasoning}`;
+
 export const competitorLabel = (seat: SeatSpec): string =>
   Match.valueTags(seat, {
     bot: (bot) => bot.label ?? `Bot (${bot.policy})`,

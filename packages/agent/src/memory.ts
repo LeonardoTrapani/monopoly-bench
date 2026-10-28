@@ -21,7 +21,7 @@ import type { Reasoning, WakeUsage } from "@mb/api";
 import { Schema } from "effect";
 
 import { thinkingLevel } from "./models.ts";
-import { addResponseUsage, EMPTY_USAGE } from "./usage.ts";
+import { addResponseUsage, EMPTY_USAGE, withReportedCost } from "./usage.ts";
 
 /** A seat's conversation: pi agent messages and where each wake still kept verbatim begins. */
 export interface Conversation {
@@ -252,8 +252,9 @@ const requestSummary = async (
       thinkingLevel: thinkingLevel(context.reasoning),
       messages: [...older],
     },
-    streamFn: (model, request, options) =>
+    streamFn: withReportedCost((model, request, options) =>
       context.streamFn(model, request, { ...options, maxTokens }),
+    ),
     getApiKey: () => context.apiKey,
     toolExecution: "sequential",
     identity: { attribution: null },

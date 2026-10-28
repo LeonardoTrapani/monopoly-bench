@@ -5,7 +5,8 @@
  *
  * The leaderboard, head-to-head, models list and model profiles count LLM competitors in games
  * where every seat is an LLM (SPEC §8): bots and games with a bot seat (local or legacy) never
- * appear there. Runs and game lists show everything.
+ * appear there. Runs and game lists show everything. There a competitor goes by its catalog
+ * name (`competitors`, written when a run is created), else by its id: never by a seat label.
  */
 import {
   type BehaviorStats,
@@ -304,9 +305,11 @@ export const leaderboard = Effect.fn("leaderboard")(function* (playersCount: Pla
   const sql = yield* SqlClient.SqlClient;
 
   const ratings = yield* decodeRows(RatingRow)(sql`
-    SELECT competitor_id, label, kind, mu, sigma, score, games, wins, updated_at
-    FROM ratings WHERE players_count = ${playersCount} AND kind = 'llm'
-    ORDER BY score DESC, competitor_id`);
+    SELECT r.competitor_id, COALESCE(c.name, r.competitor_id) AS label, r.kind, r.mu, r.sigma, r.score,
+      r.games, r.wins, r.updated_at
+    FROM ratings r LEFT JOIN competitors c ON c.competitor_id = r.competitor_id
+    WHERE r.players_count = ${playersCount} AND r.kind = 'llm'
+    ORDER BY r.score DESC, r.competitor_id`);
 
   const placements = yield* decodeRows(PlacementAggregate)(sql`
     SELECT s.competitor_id, COUNT(DISTINCT s.game_id) AS games,
@@ -388,7 +391,10 @@ export const models = Effect.fn("models")(function* () {
 
   const rows = yield* decodeRows(CompetitorRow)(sql`
     SELECT s.competitor_id,
-      COALESCE((SELECT r.label FROM ratings r WHERE r.competitor_id = s.competitor_id LIMIT 1), MAX(s.label)) AS label,
+      COALESCE(
+        (SELECT c.name FROM competitors c WHERE c.competitor_id = s.competitor_id),
+        s.competitor_id
+      ) AS label,
       MAX(s.kind) AS kind, COUNT(DISTINCT s.game_id) AS games
     FROM seats s JOIN games g ON g.id = s.game_id
     WHERE ${sql.literal(RATED_GAME)}
@@ -497,10 +503,11 @@ export const modelProfile = Effect.fn("modelProfile")(function* (id: string, rec
   const sql = yield* SqlClient.SqlClient;
 
   const [identity] = yield* decodeRows(IdentityRow)(sql`
-    SELECT label, kind FROM (
-      SELECT label, kind, 0 AS priority FROM ratings WHERE competitor_id = ${id}
+    SELECT COALESCE((SELECT name FROM competitors WHERE competitor_id = ${id}), ${id}) AS label, kind
+    FROM (
+      SELECT kind, 0 AS priority FROM ratings WHERE competitor_id = ${id}
       UNION ALL
-      SELECT label, kind, 1 AS priority FROM seats WHERE competitor_id = ${id}
+      SELECT kind, 1 AS priority FROM seats WHERE competitor_id = ${id}
     ) ORDER BY priority LIMIT 1`);
 
   if (identity === undefined || identity.kind === "bot") return null;

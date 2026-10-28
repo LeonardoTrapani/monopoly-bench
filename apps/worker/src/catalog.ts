@@ -4,8 +4,9 @@
  * for an hour per Worker isolate. When OpenRouter fails, pi-ai's bundled OpenRouter list stands
  * in (`source: "bundled"`) and OpenRouter is asked again after a few minutes.
  *
- * A run is charged at the prices of its snapshot, so models newer than pi-ai's bundled list are
- * priced and a run's prices never move under it.
+ * A run snapshots the listings of its models, so models newer than pi-ai's bundled list are
+ * priced; what a response costs is what OpenRouter reports it charged (`withReportedCost` in
+ * `@mb/agent`), and the snapshot prices only stand in when a response reports nothing.
  */
 import {
   bundledCatalog,
@@ -29,7 +30,7 @@ export interface CatalogSnapshot {
   readonly catalog: CatalogResponse;
   /** Every model id OpenRouter listed, with or without tools (empty for the bundled list). */
   readonly listed: ReadonlySet<string>;
-  /** OpenRouter's entries of the catalog's models: the prices a new run is charged at. */
+  /** OpenRouter's entries of the catalog's models: the prices a new run snapshots. */
   readonly listings: ReadonlyMap<string, ModelListing>;
 }
 
@@ -120,7 +121,8 @@ export const MIN_CONTEXT_TOKENS = 32_000;
 
 /**
  * Why a run may not seat `model`, or null when it may: it must be a catalog model (tool
- * calling) with a fixed price, since a run's budget is enforced from the price.
+ * calling) with room for a seat in its context window. Routers without a fixed price may play:
+ * the budget counts what OpenRouter reports it charged.
  */
 export const runModelProblem = (snapshot: CatalogSnapshot, model: string): string | null => {
   const entry = snapshot.catalog.models.find((candidate) => candidate.model === model);
@@ -129,10 +131,6 @@ export const runModelProblem = (snapshot: CatalogSnapshot, model: string): strin
     return snapshot.listed.has(model)
       ? `Model "${model}" does not support tool calling on OpenRouter; LLM seats play through tools.`
       : `Model "${model}" is not in the catalog of OpenRouter models that support tool calling (GET /api/catalog).`;
-  }
-
-  if (entry.pricing === null) {
-    return `Model "${model}" has no fixed price on OpenRouter (a router or variable-price model), so the run budget cannot be enforced.`;
   }
 
   if (entry.contextLength !== null && entry.contextLength < MIN_CONTEXT_TOKENS) {

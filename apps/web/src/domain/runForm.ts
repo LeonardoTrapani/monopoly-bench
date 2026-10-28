@@ -379,7 +379,7 @@ export interface RunCostEstimate {
   readonly perGameUsd: number;
   readonly games: number;
   readonly totalUsd: number;
-  /** Seats whose model has no price in the catalog (not counted). */
+  /** Seats whose model has no fixed price in the catalog, i.e. routers (not counted). */
   readonly unpricedSeats: number;
 }
 

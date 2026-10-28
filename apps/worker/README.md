@@ -62,9 +62,11 @@ POST /api/runs ──▶ RunDO (one per run)          src/runs/run-coordinator.t
 - **Catalog and prices** (`src/catalog.ts`). `GET /api/catalog` and run creation share one
   snapshot of OpenRouter's public model list (`GET https://openrouter.ai/api/v1/models`, no
   key), cached an hour per isolate; models that support tools become the catalog
-  (`@mb/agent` `catalogFromListings`). A new run may seat only catalog models with a fixed
-  price, and their listings are snapshotted into the run, so models newer than pi-ai's bundled
-  catalog are priced and a run is charged at stable prices. If OpenRouter fails, pi-ai's
+  (`@mb/agent` `catalogFromListings`). A new run may seat only catalog models, and their
+  listings are snapshotted into the run, so models newer than pi-ai's bundled catalog are
+  priced. Spending is what OpenRouter reports it charged per response (`usage.cost`), so
+  routers without a fixed price (`typesafe/jev-router`) may play; the snapshot prices only
+  responses that report nothing. If OpenRouter fails, pi-ai's
   bundled OpenRouter list stands in (`source: "bundled"`, retried after 5 minutes).
 - **Own-key runs** (`src/openrouter-key.ts`, RunDO, PlayerDO). With `x-openrouter-key` the
   key is checked with OpenRouter's `GET /api/v1/key` (refused → 401, unreachable → 502,
@@ -159,8 +161,8 @@ Runs (CORS allows `authorization`, `x-openrouter-key`, `x-run-token` and `DELETE
   needed) and `cancelToken` is returned once; without it the bench bearer is required and the
   run is `funding: "server"` (`cancelToken: null`).
 - `POST /api/runs` checks the body first (`400`: a bot seat — "Public runs seat LLMs only";
-  a `RunConfig` schema error; a model not in the catalog, without tool calling, or without a
-  fixed price), then an own key (`401` refused by OpenRouter, `502` OpenRouter unreachable,
+  a `RunConfig` schema error; a model not in the catalog, without tool calling, or with a
+  context window under 32 000 tokens), then an own key (`401` refused by OpenRouter, `502` OpenRouter unreachable,
   `400` `limit_remaining` below `budgetUsd`).
 
 Errors are `ErrorResponse` (`{ "error": "…" }`) with 400, 401, 404, 426, 500 or 502.

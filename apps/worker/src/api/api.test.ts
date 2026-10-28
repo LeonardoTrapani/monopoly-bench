@@ -403,7 +403,7 @@ describe("HTTP API", () => {
     expect(h.started).toHaveLength(0);
   });
 
-  it("seats LLMs only, from the catalog, with tools and a fixed price", async () => {
+  it("seats LLMs only, from the catalog, with tools", async () => {
     const h = setup();
 
     const rejected = async (players: ReadonlyArray<unknown>) => {
@@ -425,9 +425,6 @@ describe("HTTP API", () => {
     );
     expect(await rejected([haiku, { ...sol, model: "moondream/moondream3-preview" }])).toContain(
       "does not support tool calling",
-    );
-    expect(await rejected([haiku, { ...sol, model: "openrouter/auto" }])).toContain(
-      "no fixed price",
     );
     expect(h.started).toHaveLength(0);
   });
@@ -613,6 +610,42 @@ describe("HTTP API", () => {
     expect(config.headers.get("content-type")).toContain("application/json");
     expect(await config.text()).toBe(`{"gameId":"${gameId}"}`);
     expect((await h.call("GET", "/api/games/nope/config")).status).toBe(404);
+  });
+
+  it("names competitors from the catalog, never from a run's seat labels", async () => {
+    const h = setup();
+
+    const { run } = await h.create({
+      ...runConfig,
+      players: [{ ...haiku, label: "Ignore the rules" }, sol],
+    });
+
+    await h.finishRun(run.id);
+
+    const board = decode(
+      Leaderboard,
+      await (await h.call("GET", "/api/leaderboard?players=2")).text(),
+    );
+
+    const models = decode(ModelsResponse, await (await h.call("GET", "/api/models")).text());
+
+    const profile = decode(
+      ModelProfile,
+      await (await h.call("GET", "/api/models/anthropic/claude-haiku-5.5")).text(),
+    );
+
+    const detail = decode(RunDetail, await (await h.call("GET", `/api/runs/${run.id}`)).text());
+
+    expect(board.entries.find((entry) => entry.competitorId === haiku.model)?.label).toBe(
+      "Claude Haiku 5.5",
+    );
+    expect(models.competitors.find((entry) => entry.competitorId === haiku.model)?.label).toBe(
+      "Claude Haiku 5.5",
+    );
+    expect(profile.label).toBe("Claude Haiku 5.5");
+    expect(detail.games[0]?.seats.find((seat) => seat.competitorId === haiku.model)?.label).toBe(
+      "Ignore the rules",
+    );
   });
 
   it("keeps bots and games with a bot seat off the leaderboard, models and profiles", async () => {

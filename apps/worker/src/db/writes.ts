@@ -189,6 +189,25 @@ export const recordWake = Effect.fn("recordWake")(function* (wake: WakeRow) {
 });
 
 /** The player count of a run, or null when D1 has no such run. */
+/** A competitor's leaderboard name (`competitorName` in `@mb/api`). */
+export interface CompetitorName {
+  readonly competitorId: string;
+  readonly name: string;
+}
+
+/** Names from the catalog of a new run's snapshot; a later run refreshes them. */
+export const saveCompetitorNames = Effect.fn("saveCompetitorNames")(function* (
+  names: ReadonlyArray<CompetitorName>,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const rows = names.map((entry) => ({ competitor_id: entry.competitorId, name: entry.name }));
+
+  if (rows.length === 0) return;
+
+  yield* sql`INSERT INTO competitors ${sql.insert(rows)}
+    ON CONFLICT (competitor_id) DO UPDATE SET name = excluded.name`;
+});
+
 export const runPlayersCount = Effect.fn("runPlayersCount")(function* (runId: string) {
   const sql = yield* SqlClient.SqlClient;
 
