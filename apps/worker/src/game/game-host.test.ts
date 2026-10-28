@@ -253,7 +253,11 @@ describe("GameHost with the real engine", () => {
     expect(h.alarmsRun()).toBe(1);
 
     // Simulate a reset before the snapshot was flushed: an old snapshot plus newer events.
-    h.sql.exec("UPDATE snapshot SET seq = ?, json = ? WHERE id = 1", early?.["seq"] ?? 0, early?.["json"] ?? "");
+    h.sql.exec(
+      "UPDATE snapshot SET seq = ?, json = ? WHERE id = 1",
+      early?.["seq"] ?? 0,
+      early?.["json"] ?? "",
+    );
 
     // A new object over the same storage (as after an eviction) continues the same game.
     const resumed = new GameHost(
@@ -276,7 +280,9 @@ describe("GameHost with the real engine", () => {
       engineBinding,
     );
 
-    expect(decodeMessage(resumed.helloMessage("g1"))).toEqual(decodeMessage(h.host.helloMessage("g1")));
+    expect(decodeMessage(resumed.helloMessage("g1"))).toEqual(
+      decodeMessage(h.host.helloMessage("g1")),
+    );
 
     for (let index = 0; index < 500 && resumed.status() === "running"; index += 1) {
       await resumed.alarm();

@@ -7,6 +7,8 @@
   },
   "type": "module",
   "dependencies": {
+    "@mb/agent": "workspace:*",
+    "@mb/api": "workspace:*",
     "@mb/bots": "workspace:*",
     "@mb/engine": "workspace:*",
     "@mb/sim": "workspace:*",

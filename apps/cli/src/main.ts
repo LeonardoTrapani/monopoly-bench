@@ -1,14 +1,13 @@
 /**
- * `mb` CLI (SPEC §10). Each command lives in its own module and registers here; a
- * remote `run` command (create / status through the Worker API) can be added the same
- * way.
+ * `mb` CLI (SPEC §10). Each command lives in its own module and registers here.
  */
 import { calibrateCommand } from "./calibrate.ts";
+import { runCommand } from "./run.ts";
 import { simCommand } from "./sim.ts";
 
 import type { CliCommand } from "./cli.ts";
 
-const COMMANDS: ReadonlyArray<CliCommand> = [simCommand, calibrateCommand];
+const COMMANDS: ReadonlyArray<CliCommand> = [simCommand, calibrateCommand, runCommand];
 
 const help = (): string =>
   [

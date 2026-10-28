@@ -9,6 +9,7 @@ import { GameConfig, GameEventJson, TableFrequency } from "@mb/engine";
 import { runBotGame } from "@mb/sim";
 
 import { intFlag, parseFlags, table } from "./cli.ts";
+import { runLlmSim } from "./llm-sim.ts";
 
 import type { CliCommand } from "./cli.ts";
 import type { BotPolicy } from "@mb/bots";
@@ -109,9 +110,10 @@ const printResult = (result: GameResult, ms: number): void => {
 
 export const simCommand: CliCommand = {
   name: "sim",
-  summary: "Play a bot game in-process, print the standings and write the event log.",
+  summary:
+    "Play a game in-process (bots, or bots and LLMs on OpenRouter), print the standings and write the logs.",
   usage:
-    "mb sim [--players N] [--seed S] [--bots heuristic,random,...] [--max-rounds R] [--table-frequency everyRoll|everyTurn|everyRound|off] [--game-id ID] [--out DIR] [--no-out] [--verify]",
+    "mb sim [--players N] [--seed S] [--bots heuristic,random,...] [--llm <openrouter id>[,<id>]] [--seats heuristic,llm:<openrouter id>,...] [--reasoning off|low|medium|high] [--max-output-tokens N] [--budget-usd USD] [--max-rounds R] [--table-frequency everyRoll|everyTurn|everyRound|off] [--game-id ID] [--out DIR] [--no-out] [--verify]",
   run: async (args) => {
     const flags = parseFlags(args, {
       players: { type: "string" },
@@ -123,7 +125,14 @@ export const simCommand: CliCommand = {
       out: { type: "string" },
       "no-out": { type: "boolean" },
       verify: { type: "boolean" },
+      llm: { type: "string" },
+      seats: { type: "string" },
+      reasoning: { type: "string" },
+      "max-output-tokens": { type: "string" },
+      "budget-usd": { type: "string" },
     });
+
+    if (flags.strings.has("llm") || flags.strings.has("seats")) return runLlmSim(flags);
 
     const botsFlag = flags.strings.get("bots");
     const players = intFlag(flags, "players", botsFlag?.split(",").length ?? 4);
