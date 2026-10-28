@@ -1,4 +1,4 @@
-import { LlmSeat, estimateSeatCostUsd, type RunSummary } from "@mb/api";
+import { LlmSeat, estimateSeatCostUsd, type ModelCatalogEntry, type RunSummary } from "@mb/api";
 import { Combobox } from "@foldkit/ui";
 import { Option, Result } from "effect";
 import * as Scene from "foldkit/scene";
@@ -171,6 +171,26 @@ describe("model catalog", () => {
       "mistralai/devstral-2",
       "zeta/zeta-1",
     ]);
+  });
+
+  it("keeps each provider's models together when one slug has two provider names", () => {
+    const entry = (model: string, provider: string): ModelCatalogEntry => ({
+      ...catalog.models[0]!,
+      model,
+      label: model,
+      provider,
+      providerSlug: model.slice(0, model.indexOf("/")),
+      featured: false,
+    });
+
+    const slugs = orderCatalog([
+      entry("x-ai/grok-a", "SpaceXAI"),
+      entry("together/t-1", "Together"),
+      entry("x-ai/grok-b", "xAI"),
+    ]).map((model) => model.providerSlug);
+
+    // By provider name, "Together" sorts between "SpaceXAI" and "xAI" and splits x-ai in two.
+    expect(slugs).toEqual(["together", "x-ai", "x-ai"]);
   });
 
   it("finds models by name, provider or id, word by word", () => {
