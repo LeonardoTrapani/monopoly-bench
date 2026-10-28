@@ -1,6 +1,7 @@
 /** Response helpers: open CORS, JSON bodies encoded with the `@mb/api` schemas. */
 import { ErrorResponse } from "@mb/api";
 import { Schema } from "effect";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 
 export const CORS_HEADERS = {
   "access-control-allow-origin": "*",
@@ -9,45 +10,35 @@ export const CORS_HEADERS = {
   "access-control-max-age": "86400",
 } as const satisfies Readonly<Record<string, string>>;
 
-export const withCors = (response: Response): Response => {
-  const headers = new Headers(response.headers);
-
-  for (const [name, value] of Object.entries(CORS_HEADERS)) headers.set(name, value);
-
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-};
+const JSON_TYPE = "application/json; charset=utf-8";
 
 /** Encode `value` with `schema` (so the body has exactly the contract's shape) as JSON. */
 export const json = <S extends Schema.ConstraintEncoder<unknown>>(
   schema: S,
   value: S["Type"],
   status = 200,
-): Response =>
-  new Response(Schema.encodeUnknownSync(Schema.fromJsonString(schema))(value), {
+): HttpServerResponse.HttpServerResponse =>
+  HttpServerResponse.text(Schema.encodeUnknownSync(Schema.fromJsonString(schema))(value), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", ...CORS_HEADERS },
+    contentType: JSON_TYPE,
+    headers: CORS_HEADERS,
   });
 
-export const errorJson = (status: number, error: string): Response =>
+export const errorJson = (status: number, error: string): HttpServerResponse.HttpServerResponse =>
   json(ErrorResponse, { error }, status);
 
-export const ndjson = (body: string): Response =>
-  new Response(body, {
-    status: 200,
-    headers: { "content-type": "application/x-ndjson; charset=utf-8", ...CORS_HEADERS },
+export const ndjson = (body: string): HttpServerResponse.HttpServerResponse =>
+  HttpServerResponse.text(body, {
+    contentType: "application/x-ndjson; charset=utf-8",
+    headers: CORS_HEADERS,
   });
 
 /** A JSON body produced elsewhere with its own schema (e.g. the engine's `GameConfig`). */
-export const jsonText = (body: string): Response =>
-  new Response(body, {
-    status: 200,
-    headers: { "content-type": "application/json; charset=utf-8", ...CORS_HEADERS },
-  });
+export const jsonText = (body: string): HttpServerResponse.HttpServerResponse =>
+  HttpServerResponse.text(body, { contentType: JSON_TYPE, headers: CORS_HEADERS });
 
-export const preflight = (): Response => new Response(null, { status: 204, headers: CORS_HEADERS });
+export const preflight = (): HttpServerResponse.HttpServerResponse =>
+  HttpServerResponse.empty({ status: 204, headers: CORS_HEADERS });
 
-export const noContent = (): Response => new Response(null, { status: 204, headers: CORS_HEADERS });
+export const noContent = (): HttpServerResponse.HttpServerResponse =>
+  HttpServerResponse.empty({ status: 204, headers: CORS_HEADERS });

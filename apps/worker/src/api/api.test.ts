@@ -16,7 +16,9 @@ import {
   RunsResponse,
 } from "@mb/api";
 import type { D1Client } from "@effect/sql-d1";
-import { Effect, Schema } from "effect";
+import { Effect, Layer, Schema } from "effect";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import type { SqlClient } from "effect/sql/SqlClient";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -32,10 +34,12 @@ import {
   recordWake,
   updateRun,
 } from "../db/writes.ts";
+import { upstream } from "../errors.ts";
 import { archiveKeys } from "../game/game-host.ts";
 import type { KeyCheck } from "../openrouter-key.ts";
 import { RunCoordinator } from "../runs/run-coordinator.ts";
 import { memoryBucket } from "../testing/archive.ts";
+import { noop, run as runEffect } from "../testing/effect.ts";
 import { memoryD1, memorySqlPort } from "../testing/sqlite.ts";
 import { sha256Hex } from "./auth.ts";
 import { type ApiDeps, handleApi } from "./router.ts";
@@ -82,8 +86,14 @@ interface KeyCheckScript {
 const setup = () => {
   const d1 = memoryD1();
 
+  const withD1 = <A, E>(effect: Effect.Effect<A, E, D1Client.D1Client | SqlClient>) =>
+    effect.pipe(Effect.provide(Layer.orDie(d1.layer)));
+
+  const viaD1 = <A, E>(effect: Effect.Effect<A, E, D1Client.D1Client | SqlClient>) =>
+    withD1(effect).pipe(upstream("D1"));
+
   const runD1 = <A, E>(effect: Effect.Effect<A, E, D1Client.D1Client | SqlClient>) =>
-    Effect.runPromise(effect.pipe(Effect.provide(d1.layer)));
+    runEffect(withD1(effect));
 
   const started: Array<GameStart> = [];
   const purged: Array<string> = [];
@@ -101,27 +111,25 @@ const setup = () => {
     const created = new RunCoordinator({
       sql: memorySqlPort(),
       db: {
-        insertRun: (run) => runD1(insertRun(run)),
+        insertRun: (newRun) => viaD1(insertRun(newRun)),
         updateRun: (id, status, spent, finishedAt) =>
-          runD1(updateRun(id, status, spent, finishedAt)),
-        abortQueued: (ids, at) => runD1(abortQueuedGames(ids, at)),
-        applyRatings: async (input) => {
-          await runD1(applyGameRatings(input));
-        },
+          viaD1(updateRun(id, status, spent, finishedAt)),
+        abortQueued: (ids, at) => viaD1(abortQueuedGames(ids, at)),
+        applyRatings: (input) => viaD1(applyGameRatings(input)).pipe(Effect.asVoid),
       },
       games: {
-        start: async (start) => {
-          started.push(start);
-          await runD1(markGameRunning(start.gameId, "2026-10-28T10:00:00.000Z"));
-        },
-        abort: async () => {},
-        purge: async (gameId) => {
-          purged.push(gameId);
-        },
+        start: (start) =>
+          Effect.sync(() => started.push(start)).pipe(
+            Effect.andThen(viaD1(markGameRunning(start.gameId, "2026-10-28T10:00:00.000Z"))),
+          ),
+        abort: noop,
+        purge: (gameId) =>
+          Effect.sync(() => {
+            purged.push(gameId);
+          }),
       },
-      setAlarm: async () => {},
+      setAlarm: noop,
       now: () => Date.parse("2026-10-28T10:00:00.000Z"),
-      log: () => {},
     });
 
     coordinators.set(runId, created);
@@ -135,32 +143,35 @@ const setup = () => {
     benchApiKey: API_KEY,
     runs: {
       create: (runId, config, listings, ownKey) =>
-        coordinator(runId).create(runId, config, listings, ownKey),
-      cancel: async (runId) => (coordinators.has(runId) ? coordinator(runId).cancel() : null),
-      cancelTokenMatches: async (runId, tokenSha256) =>
-        coordinators.has(runId) && coordinator(runId).cancelTokenMatches(tokenSha256),
-      purge: async (runId) => {
-        if (coordinators.has(runId)) await coordinator(runId).purge();
-      },
+        coordinator(runId).create(runId, config, listings, ownKey).pipe(upstream("RunDO create")),
+      cancel: (runId) =>
+        coordinators.has(runId) ? coordinator(runId).cancel() : Effect.succeed(null),
+      cancelTokenMatches: (runId, tokenSha256) =>
+        Effect.sync(
+          () => coordinators.has(runId) && coordinator(runId).cancelTokenMatches(tokenSha256),
+        ),
+      purge: (runId) => (coordinators.has(runId) ? coordinator(runId).purge() : Effect.void),
     },
     games: {
-      liveEvents: async () => '{"seq":1}\n',
-      archivedEvents: async (gameId) => archive.objects.get(archiveKeys.events(gameId)) ?? null,
-      liveTranscripts: async () => "",
-      archivedTranscripts: async (gameId, seat) => `{"gameId":"${gameId}","seat":"${seat}"}\n`,
-      liveConfig: async () => null,
-      archivedConfig: async (gameId) => `{"gameId":"${gameId}"}`,
-      spectate: async () => new Response(null, { status: 204 }),
-      deleteArchives: async (runId, gameIds) => {
-        await deleteRunArchives(archive.bucket, runId, gameIds);
-      },
+      liveEvents: () => Effect.succeed('{"seq":1}\n'),
+      archivedEvents: (gameId) =>
+        Effect.sync(() => archive.objects.get(archiveKeys.events(gameId)) ?? null),
+      liveTranscripts: () => Effect.succeed(""),
+      archivedTranscripts: (gameId, seat) =>
+        Effect.succeed(`{"gameId":"${gameId}","seat":"${seat}"}\n`),
+      liveConfig: () => Effect.succeed(null),
+      archivedConfig: (gameId) => Effect.succeed(`{"gameId":"${gameId}"}`),
+      spectate: () => Effect.succeed(HttpServerResponse.empty({ status: 204 })),
+      deleteArchives: (runId, gameIds) =>
+        deleteRunArchives(archive.bucket, runId, gameIds).pipe(Effect.asVoid),
     },
-    catalog: async () => snapshot,
-    checkOpenRouterKey: async (key) => {
-      keyChecks.push(key);
+    catalog: Effect.succeed(snapshot),
+    checkOpenRouterKey: (key) =>
+      Effect.sync(() => {
+        keyChecks.push(key);
 
-      return keyCheck.next;
-    },
+        return keyCheck.next;
+      }),
     newRunId: () => {
       nextRun += 1;
 
@@ -184,7 +195,9 @@ const setup = () => {
       body: init.body ?? null,
     });
 
-    return runD1(handleApi(request, deps));
+    return runD1(handleApi(HttpServerRequest.fromWeb(request), deps)).then(
+      HttpServerResponse.toWeb,
+    );
   };
 
   const create = async (config: RunConfig = runConfig) =>
@@ -303,19 +316,21 @@ const setup = () => {
     archive.objects.set(archiveKeys.config(start.gameId), "{}");
     archive.objects.set(archiveKeys.seat(start.gameId, "A"), "");
 
-    await coordinator(start.runId).gameFinished({
-      gameId: start.gameId,
-      status: "finished",
-      playersCount: 2,
-      finishedAt,
-      results: start.seats.map((seat) => ({
-        seat: seat.seat,
-        competitorId: seat.competitorId,
-        label: seat.label,
-        kind: seat.kind,
-        rank: seat.competitorId === winner ? 1 : 2,
-      })),
-    });
+    await runEffect(
+      coordinator(start.runId).gameFinished({
+        gameId: start.gameId,
+        status: "finished",
+        playersCount: 2,
+        finishedAt,
+        results: start.seats.map((seat) => ({
+          seat: seat.seat,
+          competitorId: seat.competitorId,
+          label: seat.label,
+          kind: seat.kind,
+          rank: seat.competitorId === winner ? 1 : 2,
+        })),
+      }),
+    );
   };
 
   /** Plays every game of the run (including those started as others finish). */
@@ -753,7 +768,9 @@ describe("own-key runs", () => {
 
     expect((await h.call("POST", path)).status).toBe(401);
     expect((await h.call("POST", path, { runToken: "token-2" })).status).toBe(401);
-    expect((await h.call("POST", path, { runToken: await sha256Hex("token-1") })).status).toBe(401);
+    expect(
+      (await h.call("POST", path, { runToken: await runEffect(sha256Hex("token-1")) })).status,
+    ).toBe(401);
 
     const cancelled = await h.call("POST", path, { runToken: "token-1" });
 

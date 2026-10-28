@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
+import { run } from "../testing/effect.ts";
 import { bearerToken, constantTimeEqual, isAuthorized } from "./auth.ts";
 
 describe("auth", () => {
@@ -13,20 +14,20 @@ describe("auth", () => {
   });
 
   it("compares in constant time over hashes", async () => {
-    expect(await constantTimeEqual("secret", "secret")).toBe(true);
-    expect(await constantTimeEqual("secret", "secreT")).toBe(false);
-    expect(await constantTimeEqual("secret", "secret-and-more")).toBe(false);
-    expect(await constantTimeEqual("", "")).toBe(true);
+    expect(await run(constantTimeEqual("secret", "secret"))).toBe(true);
+    expect(await run(constantTimeEqual("secret", "secreT"))).toBe(false);
+    expect(await run(constantTimeEqual("secret", "secret-and-more"))).toBe(false);
+    expect(await run(constantTimeEqual("", ""))).toBe(true);
   });
 
   it("authorizes only the configured key", async () => {
-    expect(await isAuthorized("Bearer k-1", "k-1")).toBe(true);
-    expect(await isAuthorized("Bearer k-2", "k-1")).toBe(false);
-    expect(await isAuthorized(null, "k-1")).toBe(false);
+    expect(await run(isAuthorized("Bearer k-1", "k-1"))).toBe(true);
+    expect(await run(isAuthorized("Bearer k-2", "k-1"))).toBe(false);
+    expect(await run(isAuthorized(null, "k-1"))).toBe(false);
   });
 
   it("keeps protected routes closed when no key is configured", async () => {
-    expect(await isAuthorized("Bearer ", "")).toBe(false);
-    expect(await isAuthorized("Bearer anything", "")).toBe(false);
+    expect(await run(isAuthorized("Bearer ", ""))).toBe(false);
+    expect(await run(isAuthorized("Bearer anything", ""))).toBe(false);
   });
 });

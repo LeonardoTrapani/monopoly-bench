@@ -111,10 +111,11 @@ persist the conversation ourselves (`conversation` table in PlayerDO, one row pe
 
 | Path                         | What                                                                                 |
 | ---------------------------- | ------------------------------------------------------------------------------------ |
-| `alchemy.run.ts`             | Stack: Worker, DO namespaces, D1 (+ migrations), R2, secrets, domain                 |
+| `alchemy.run.ts`             | Stack: the Worker and the PR preview comment                                         |
+| `src/resources.ts`           | D1 (+ migrations) and R2, bound by the Worker and the DOs; prod stage and domain     |
 | `stacks/github.ts`           | CI credentials: scoped Cloudflare token and Actions secrets                          |
 | `migrations/`                | D1 schema (SPEC §7.3): `0001_init.sql`, `0002_…` (funding, memory), `0003_…` (names) |
-| `src/worker.ts`              | Entry: `/api/*` → router, else assets; exports the DO classes                        |
+| `src/worker.ts`              | The Effect Worker: props (assets, domain, secrets), `/api/*` → router, else assets   |
 | `src/api/`                   | Router, auth (bearer, cancel tokens), CORS/JSON helpers                              |
 | `src/catalog.ts`             | Model catalog: OpenRouter list (1 h cache) or pi-ai's bundled list                   |
 | `src/openrouter-key.ts`      | Own-key check with OpenRouter's `GET /api/v1/key`                                    |
@@ -125,12 +126,18 @@ persist the conversation ourselves (`conversation` table in PlayerDO, one row pe
 | `src/game/engine-binding.ts` | The seam bound to `@mb/engine`, `@mb/bots`, `@mb/agent`; D1 records                  |
 | `src/game/game-host.ts`      | GameDO logic                                                                         |
 | `src/player/player-host.ts`  | PlayerDO logic                                                                       |
-| `src/do/`                    | Thin `cloudflare:workers` adapters (`GameDO`, `PlayerDO`, `RunDO`)                   |
+| `src/do/`                    | Effect Durable Objects (`GameDO`, `PlayerDO`, `RunDO`): thin adapters to the hosts   |
 | `src/contracts.ts`           | Payloads between the Worker and the DOs, spectator messages                          |
-| `src/testing/`               | `node:sqlite` fakes of D1 and DO SQLite, an in-memory R2 bucket                      |
+| `src/errors.ts`              | `UpstreamError`: a failed call to D1, R2, another DO or OpenRouter                   |
+| `src/testing/`               | `node:sqlite` fakes of D1 and DO SQLite, an in-memory R2 bucket, Effect test helpers |
 
-The hosts (`GameHost`, `PlayerHost`, `RunCoordinator`) take ports (SQL, D1, R2, other DOs,
-alarm, clock), so the unit tests run them against `node:sqlite` with the real migrations.
+Everything runs in Effect: the Worker and the Durable Objects are Alchemy's Effect platform
+classes (`Cloudflare.Worker`, `Cloudflare.DurableObject`), their RPC methods return Effects, and
+the hosts (`GameHost`, `PlayerHost`, `RunCoordinator`) take Effect ports (D1, R2, other DOs,
+alarm) plus a synchronous SQL port and clock, so the unit tests run them against `node:sqlite`
+with the real migrations. Failed calls out of an object are `UpstreamError`s; the hosts log
+them with `Effect.logError` and retry or pass them on. The one Promise boundary left is the Pi
+agent loop (`runWake`), which `PlayerHost` wraps.
 
 ## API
 

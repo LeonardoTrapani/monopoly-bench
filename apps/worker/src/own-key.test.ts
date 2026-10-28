@@ -14,7 +14,9 @@ import {
 import { CreateRunResponse, LlmSeat, type RunConfig } from "@mb/api";
 import type { Command, GameEvent, GameState } from "@mb/engine";
 import type { D1Client } from "@effect/sql-d1";
-import { Effect, Schema } from "effect";
+import { Effect, Layer, Schema } from "effect";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import type { SqlClient } from "effect/sql/SqlClient";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -33,7 +35,9 @@ import {
 import { engineBinding } from "./game/engine-binding.ts";
 import { archiveKeys, GameHost } from "./game/game-host.ts";
 import { openRouterKeyFor, PlayerHost } from "./player/player-host.ts";
+import { upstream } from "./errors.ts";
 import { RunCoordinator } from "./runs/run-coordinator.ts";
+import { run } from "./testing/effect.ts";
 import { type MemorySqlPort, memoryD1, memorySqlPort } from "./testing/sqlite.ts";
 
 const OWN_KEY = "sk-or-v1-own-key-canary-5f3a9c";
@@ -91,7 +95,7 @@ describe("own-key runs end to end", () => {
     const d1 = memoryD1();
 
     const runD1 = <A, E>(effect: Effect.Effect<A, E, D1Client.D1Client | SqlClient>) =>
-      Effect.runPromise(effect.pipe(Effect.provide(d1.layer)));
+      effect.pipe(Effect.provide(Layer.orDie(d1.layer)), upstream("D1"));
 
     const archive = new Map<string, string>();
     const broadcasts: Array<string> = [];
@@ -99,11 +103,7 @@ describe("own-key runs end to end", () => {
     const keysSeen: Array<string | undefined> = [];
     const storages: Array<MemorySqlPort> = [];
     const alarms = new Map<string, number | null>();
-    const runners = new Map<string, () => Promise<void>>();
-
-    const log = (message: string, cause?: unknown) => {
-      logs.push(`${message} ${cause instanceof Error ? (cause.stack ?? "") : String(cause)}`);
-    };
+    const runners = new Map<string, () => Effect.Effect<void, unknown>>();
 
     const storage = () => {
       const port = memorySqlPort();
@@ -113,9 +113,10 @@ describe("own-key runs end to end", () => {
       return port;
     };
 
-    const alarmOf = (name: string) => async (at: number | null) => {
-      alarms.set(name, at);
-    };
+    const alarmOf = (name: string) => (at: number | null) =>
+      Effect.sync(() => {
+        alarms.set(name, at);
+      });
 
     let echoed = false;
 
@@ -145,18 +146,15 @@ describe("own-key runs end to end", () => {
         updateRun: (id, status, spent, finishedAt) =>
           runD1(updateRun(id, status, spent, finishedAt)),
         abortQueued: (ids, at) => runD1(abortQueuedGames(ids, at)),
-        applyRatings: async (input) => {
-          await runD1(applyGameRatings(input));
-        },
+        applyRatings: (input) => runD1(applyGameRatings(input)).pipe(Effect.asVoid),
       },
       games: {
         start: (start) => game(start.gameId).start(start),
         abort: (gameId, reason) => game(gameId).abort(reason),
-        purge: async () => {},
+        purge: () => Effect.void,
       },
       setAlarm: alarmOf("run"),
       now: () => now,
-      log,
     });
 
     const games = new Map<string, GameHost<GameState, GameEvent, Command>>();
@@ -177,13 +175,14 @@ describe("own-key runs end to end", () => {
             finish: (finished) => runD1(finishGame(finished)),
           },
           archive: {
-            put: async (key, body) => {
-              archive.set(key, body);
-            },
+            put: (key, body) =>
+              Effect.sync(() => {
+                archive.set(key, body);
+              }),
           },
           players: { wake: (request) => player(`${request.gameId}:${request.seat}`).wake(request) },
           run: {
-            charge: async (_runId, id, key, costUsd) => coordinator.charge(id, key, costUsd),
+            charge: (_runId, id, key, costUsd) => coordinator.charge(id, key, costUsd),
             gameFinished: (_runId, outcome) => coordinator.gameFinished(outcome),
           },
           broadcast: (message) => {
@@ -191,7 +190,6 @@ describe("own-key runs end to end", () => {
           },
           setAlarm: alarmOf(`game:${gameId}`),
           now: () => now,
-          log,
         },
         engineBinding,
       );
@@ -213,18 +211,18 @@ describe("own-key runs end to end", () => {
           submit: (call) => game(call.gameId).submit(call),
           done: (call) => game(call.gameId).done(call),
           inspect: (call) => game(call.gameId).inspect(call),
-          activity: async (gameId, activity) => game(gameId).activity(activity),
+          activity: (gameId, activity) => Effect.sync(() => game(gameId).activity(activity)),
           wakeFinished: (report) => game(report.gameId).wakeFinished(report),
         },
         // As PlayerDO: who pays is asked of the run before every wake.
-        models: async () => ({
-          model: scripted.model,
-          streamFn: scripted.streamFn,
-          apiKey: openRouterKeyFor(coordinator.credentials(), SERVER_KEY),
-        }),
+        models: () =>
+          Effect.sync(() => ({
+            model: scripted.model,
+            streamFn: scripted.streamFn,
+            apiKey: openRouterKeyFor(coordinator.credentials(), SERVER_KEY),
+          })),
         setAlarm: alarmOf(`player:${name}`),
         now: () => now,
-        log,
       });
 
       players.set(name, created);
@@ -237,26 +235,29 @@ describe("own-key runs end to end", () => {
       benchApiKey: "bench-key",
       runs: {
         create: (runId, config, listings, ownKey) =>
-          coordinator.create(runId, config, listings, ownKey),
-        cancel: async () => coordinator.cancel(),
-        cancelTokenMatches: async (_runId, tokenSha256) =>
-          coordinator.cancelTokenMatches(tokenSha256),
+          coordinator.create(runId, config, listings, ownKey).pipe(upstream("RunDO create")),
+        cancel: () => coordinator.cancel(),
+        cancelTokenMatches: (_runId, tokenSha256) =>
+          Effect.sync(() => coordinator.cancelTokenMatches(tokenSha256)),
         purge: () => coordinator.purge(),
       },
       games: {
-        liveEvents: async (gameId, since) => game(gameId).eventsSince(since),
-        archivedEvents: async (gameId) => archive.get(archiveKeys.events(gameId)) ?? null,
-        liveTranscripts: async (gameId, seat) => game(gameId).transcripts(seat),
-        archivedTranscripts: async (gameId, seat) =>
-          archive.get(archiveKeys.seat(gameId, seat)) ?? null,
-        liveConfig: async (gameId) => game(gameId).config(),
-        archivedConfig: async (gameId) => archive.get(archiveKeys.config(gameId)) ?? null,
-        spectate: async () => new Response(null, { status: 204 }),
-        deleteArchives: async () => {},
+        liveEvents: (gameId, since) => Effect.sync(() => game(gameId).eventsSince(since)),
+        archivedEvents: (gameId) =>
+          Effect.sync(() => archive.get(archiveKeys.events(gameId)) ?? null),
+        liveTranscripts: (gameId, seat) => Effect.sync(() => game(gameId).transcripts(seat)),
+        archivedTranscripts: (gameId, seat) =>
+          Effect.sync(() => archive.get(archiveKeys.seat(gameId, seat)) ?? null),
+        liveConfig: (gameId) => Effect.sync(() => game(gameId).config()),
+        archivedConfig: (gameId) =>
+          Effect.sync(() => archive.get(archiveKeys.config(gameId)) ?? null),
+        spectate: () => Effect.succeed(HttpServerResponse.empty({ status: 204 })),
+        deleteArchives: () => Effect.void,
       },
-      catalog: async () =>
+      catalog: Effect.sync(() =>
         liveSnapshot(listingsOfModelList(openRouterModelListSample()), "2026-10-28T09:00:00.000Z"),
-      checkOpenRouterKey: async () => ({ status: "valid", limitRemainingUsd: null }),
+      ),
+      checkOpenRouterKey: () => Effect.succeed({ status: "valid", limitRemainingUsd: null }),
       newRunId: () => "r-own",
       newCancelToken: () => "cancel-token-1",
     };
@@ -269,14 +270,20 @@ describe("own-key runs end to end", () => {
       headers: Record<string, string> = {},
       body?: string,
     ) => {
-      const response = await runD1(
-        handleApi(
-          new Request(`https://bench.test${path}`, { method, headers, body: body ?? null }),
-          deps,
+      const request = new Request(`https://bench.test${path}`, {
+        method,
+        headers,
+        body: body ?? null,
+      });
+
+      const response = await run(
+        handleApi(HttpServerRequest.fromWeb(request), deps).pipe(
+          Effect.provide(Layer.orDie(d1.layer)),
         ),
+        logs,
       );
 
-      const text = await response.text();
+      const text = await HttpServerResponse.toWeb(response).text();
 
       responses.push(text);
 
@@ -309,7 +316,9 @@ describe("own-key runs end to end", () => {
       if (due === undefined) break;
 
       alarms.set(due[0], null);
-      await runners.get(due[0])?.();
+      const runner = runners.get(due[0]);
+
+      if (runner !== undefined) await run(runner(), logs);
     }
 
     expect(coordinator.summary()?.status).toBe("finished");

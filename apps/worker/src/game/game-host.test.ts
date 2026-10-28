@@ -1,6 +1,6 @@
 import { BotSeat, LlmSeat, type SeatSpec, WakeTranscript } from "@mb/api";
 import { createConfig, GameConfig, GameEvent, replay, standings } from "@mb/engine";
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -12,6 +12,7 @@ import {
 } from "../contracts.ts";
 import type { FinishedGame, WakeRow } from "../db/writes.ts";
 import { planSeats } from "../runs/expand.ts";
+import { noop, port, run } from "../testing/effect.ts";
 import { memorySqlPort } from "../testing/sqlite.ts";
 import { engineBinding } from "./engine-binding.ts";
 import { archiveKeys, GameHost, MAX_CONSECUTIVE_MODEL_ERRORS, WAKE_GRACE_MS } from "./game-host.ts";
@@ -76,35 +77,35 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
     {
       sql,
       db: {
-        markRunning: async () => {},
-        progress: async () => {},
-        recordWake: async (row) => {
+        markRunning: noop,
+        progress: noop,
+        recordWake: port((row: WakeRow) => {
           if (failures.recordWake > 0) {
             failures.recordWake -= 1;
             throw new Error("D1 unavailable");
           }
 
           wakeRows.push(row);
-        },
-        finish: async (game) => {
+        }),
+        finish: port(async (game: FinishedGame) => {
           finishes.push(game);
           await hooks.duringFinish?.();
-        },
+        }),
       },
       archive: {
-        put: async (key, body) => {
+        put: port(async (key: string, body: string) => {
           archiveGate.calls += 1;
           await archiveGate.opened;
           archive.set(key, body);
-        },
+        }),
       },
       players: {
-        wake: async (request) => {
+        wake: port((request: WakeRequest) => {
           wakes.push(request);
-        },
+        }),
       },
       run: {
-        charge: async (_runId, _gameId, key) => {
+        charge: port((_runId: string, _gameId: string, key: string) => {
           if (failures.charge > 0) {
             failures.charge -= 1;
             throw new Error("RunDO unavailable");
@@ -113,19 +114,19 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
           charges.push(key);
 
           return { exhausted: options.exhaustAfterCharge === true };
-        },
-        gameFinished: async (_runId, outcome) => {
+        }),
+        gameFinished: port((_runId: string, outcome: GameOutcome) => {
           outcomes.push(outcome);
-        },
+        }),
       },
       broadcast: (message) => {
         broadcasts.push(message);
       },
-      setAlarm: async (at) => {
-        alarm = at;
-      },
+      setAlarm: (at) =>
+        Effect.sync(() => {
+          alarm = at;
+        }),
       now: () => clock.now,
-      log: () => {},
       stepsPerAlarm: options.stepsPerAlarm ?? 400,
     },
     engineBinding,
@@ -161,7 +162,7 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
 
       alarm = null;
       alarmsRun += 1;
-      await host.alarm();
+      await run(host.alarm());
     }
   };
 
@@ -244,7 +245,7 @@ describe("GameHost with the real engine", () => {
   it("plays a bot-only Monopoly game to the end, archives it and notifies the run", async () => {
     const h = setup([heuristic(), random(), heuristic()], { maxRounds: 12 });
 
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
     await h.drain();
 
     expect(h.host.status()).toBe("finished");
@@ -285,7 +286,7 @@ describe("GameHost with the real engine", () => {
   it("yields to fresh alarms on long bot games and resumes from snapshot + events", async () => {
     const h = setup([random(), random()], { maxRounds: 120, stepsPerAlarm: 25 });
 
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
 
     const early = h.sql.exec("SELECT seq, json FROM snapshot WHERE id = 1")[0];
 
@@ -306,18 +307,17 @@ describe("GameHost with the real engine", () => {
       {
         sql: h.sql,
         db: {
-          markRunning: async () => {},
-          progress: async () => {},
-          recordWake: async () => {},
-          finish: async () => {},
+          markRunning: noop,
+          progress: noop,
+          recordWake: noop,
+          finish: noop,
         },
-        archive: { put: async () => {} },
-        players: { wake: async () => {} },
-        run: { charge: async () => ({ exhausted: false }), gameFinished: async () => {} },
+        archive: { put: noop },
+        players: { wake: noop },
+        run: { charge: () => Effect.succeed({ exhausted: false }), gameFinished: noop },
         broadcast: () => {},
-        setAlarm: async () => {},
+        setAlarm: noop,
         now: () => h.clock.now,
-        log: () => {},
       },
       engineBinding,
     );
@@ -327,7 +327,7 @@ describe("GameHost with the real engine", () => {
     );
 
     for (let index = 0; index < 500 && resumed.status() === "running"; index += 1) {
-      await resumed.alarm();
+      await run(resumed.alarm());
     }
 
     expect(resumed.status()).toBe("finished");
@@ -336,8 +336,8 @@ describe("GameHost with the real engine", () => {
   it("is idempotent on start", async () => {
     const h = setup([random(), random()]);
 
-    await h.host.start(h.start);
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
+    await run(h.host.start(h.start));
 
     expect(
       h.host
@@ -350,7 +350,7 @@ describe("GameHost with the real engine", () => {
   it("wakes LLM seats with the system prompt and wake message, and applies their answers once", async () => {
     const h = setup([llm("Opus"), random()]);
 
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
     await h.drain();
 
     const wake = h.lastWake();
@@ -363,28 +363,31 @@ describe("GameHost with the real engine", () => {
     expect(wake.systemPrompt).toContain("after 3 full rounds");
     expect(wake.deadline).toBe(h.clock.now + 180_000 + WAKE_GRACE_MS);
 
-    const seen = await h.host.inspect(
-      h.call(wake, "c1", "inspect", { topic: "deed", subject: 39 }),
+    const seen = await run(
+      h.host.inspect(h.call(wake, "c1", "inspect", { topic: "deed", subject: 39 })),
     );
 
     expect(seen).toMatchObject({ ok: true, terminal: false });
     expect(seen.message).toContain("Boardwalk (39, boardwalk)");
 
-    const noted = await h.host.submit(h.call(wake, "c2", "note", { text: "Roll high." }));
+    const noted = await run(h.host.submit(h.call(wake, "c2", "note", { text: "Roll high." })));
     expect(noted).toEqual({ ok: true, message: "Notes saved (10 characters).", terminal: false });
 
-    const illegal = await h.host.submit(h.call(wake, "c3", "build", { property: "boardwalk" }));
+    const illegal = await run(
+      h.host.submit(h.call(wake, "c3", "build", { property: "boardwalk" })),
+    );
+
     expect(illegal.ok).toBe(false);
     expect(illegal.terminal).toBe(false);
     expect(illegal.message).not.toContain("Invalid arguments");
 
-    const unknownDeed = await h.host.submit(
-      h.call(wake, "c4", "mortgage", { property: "Park Lane" }),
+    const unknownDeed = await run(
+      h.host.submit(h.call(wake, "c4", "mortgage", { property: "Park Lane" })),
     );
 
     expect(unknownDeed.message).toContain("Unknown deed");
 
-    const malformed = await h.host.submit(h.call(wake, "c5", "bid", { amount: "lots" }));
+    const malformed = await run(h.host.submit(h.call(wake, "c5", "bid", { amount: "lots" })));
     expect(malformed).toEqual({
       ok: false,
       message: "Invalid arguments for bid.",
@@ -392,18 +395,18 @@ describe("GameHost with the real engine", () => {
     });
 
     const eventsBefore = h.host.eventsSince(0);
-    const answered = await h.host.done(h.call(wake, "c6", "done"));
+    const answered = await run(h.host.done(h.call(wake, "c6", "done")));
     expect(answered).toMatchObject({ ok: true, terminal: true });
 
     const eventsAfter = h.host.eventsSince(0);
     expect(eventsAfter.length).toBeGreaterThan(eventsBefore.length);
 
     // Same idempotency key: the stored answer, nothing applied twice.
-    expect(await h.host.done(h.call(wake, "c6", "done"))).toEqual(answered);
+    expect(await run(h.host.done(h.call(wake, "c6", "done")))).toEqual(answered);
     expect(h.host.eventsSince(0)).toBe(eventsAfter);
 
     // Another call on the answered decision: refused and terminal.
-    const late = await h.host.done(h.call(wake, "c7", "done"));
+    const late = await run(h.host.done(h.call(wake, "c7", "done")));
     expect(late).toMatchObject({ ok: false, terminal: true });
 
     await h.drain();
@@ -416,7 +419,7 @@ describe("GameHost with the real engine", () => {
   it("applies the default at the deadline and records a timed-out wake with no report", async () => {
     const h = setup([llm("Opus"), random()]);
 
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
     await h.drain();
 
     const wake = h.lastWake();
@@ -437,27 +440,27 @@ describe("GameHost with the real engine", () => {
     expect(h.wakes.length).toBeGreaterThan(before);
 
     // The late report replaces the row with its real usage and stays a timeout.
-    await h.host.wakeFinished(report(wake));
+    await run(h.host.wakeFinished(report(wake)));
     expect(h.wakeRows.at(-1)).toMatchObject({
       decisionId: wake.decisionId,
       timedOut: true,
       costUsd: 0.25,
     });
 
-    const stale = await h.host.done(h.call(wake, "late", "done"));
+    const stale = await run(h.host.done(h.call(wake, "late", "done")));
     expect(stale).toMatchObject({ ok: false, terminal: true });
   });
 
   it("records a finished wake once, charges the run and defaults an unanswered decision", async () => {
     const h = setup([llm("Opus"), random()]);
 
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
     await h.drain();
 
     const wake = h.lastWake();
 
-    await h.host.wakeFinished(report(wake));
-    await h.host.wakeFinished(report(wake));
+    await run(h.host.wakeFinished(report(wake)));
+    await run(h.host.wakeFinished(report(wake)));
     await h.drain();
 
     expect(h.wakeRows).toHaveLength(1);
@@ -472,7 +475,7 @@ describe("GameHost with the real engine", () => {
   it("finishes a wake report that a crash cut off half-way", async () => {
     const h = setup([llm("Opus"), random()]);
 
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
     await h.drain();
 
     const wake = h.lastWake();
@@ -485,7 +488,7 @@ describe("GameHost with the real engine", () => {
       1,
       "{}",
     );
-    await h.host.wakeFinished(report(wake));
+    await run(h.host.wakeFinished(report(wake)));
     await h.drain();
 
     expect(h.wakeRows).toHaveLength(1);
@@ -496,15 +499,21 @@ describe("GameHost with the real engine", () => {
   it("keeps a report unprocessed until its accounting is written, so retries record it (F2)", async () => {
     const h = setup([llm("Opus"), random()], { failRecordWake: 1, failCharge: 1 });
 
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
     await h.drain();
 
     const wake = h.lastWake();
 
-    await expect(h.host.wakeFinished(report(wake))).rejects.toThrow("D1 unavailable");
-    await expect(h.host.wakeFinished(report(wake))).rejects.toThrow("RunDO unavailable");
-    await h.host.wakeFinished(report(wake));
-    await h.host.wakeFinished(report(wake));
+    await expect(run(h.host.wakeFinished(report(wake)))).rejects.toHaveProperty(
+      "cause.message",
+      "D1 unavailable",
+    );
+    await expect(run(h.host.wakeFinished(report(wake)))).rejects.toHaveProperty(
+      "cause.message",
+      "RunDO unavailable",
+    );
+    await run(h.host.wakeFinished(report(wake)));
+    await run(h.host.wakeFinished(report(wake)));
 
     expect(new Set(h.wakeRows.map((row) => row.decisionId))).toEqual(new Set([wake.decisionId]));
     expect(h.charges).toEqual([`g1:A:${wake.decisionId}`]);
@@ -512,7 +521,7 @@ describe("GameHost with the real engine", () => {
 
   /** Every LLM decision runs out its deadline until the turn cap ends the game. */
   const playToTurnCap = async (h: ReturnType<typeof setup>): Promise<void> => {
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
     await h.drain();
 
     for (let guard = 0; guard < 100 && h.outcomes.length === 0; guard += 1) {
@@ -531,7 +540,7 @@ describe("GameHost with the real engine", () => {
 
     const late = h.lastWake();
 
-    await h.host.wakeFinished(report(late));
+    await run(h.host.wakeFinished(report(late)));
     await h.drain();
 
     expect(h.archive.get(archiveKeys.seat("g1", "A"))).toContain(
@@ -548,7 +557,7 @@ describe("GameHost with the real engine", () => {
 
       reported.push(late.decisionId);
       h.hooks.duringFinish = null;
-      await h.host.wakeFinished(report(late));
+      await run(h.host.wakeFinished(report(late)));
     };
 
     await playToTurnCap(h);
@@ -561,13 +570,13 @@ describe("GameHost with the real engine", () => {
   it("aborts the game instead of waking once the budget is exhausted", async () => {
     const h = setup([llm("Opus"), random()], { exhaustAfterCharge: true });
 
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
     await h.drain();
 
     const wake = h.lastWake();
     const before = h.wakes.length;
 
-    await h.host.wakeFinished(report(wake, "answered"));
+    await run(h.host.wakeFinished(report(wake, "answered")));
     await h.drain();
 
     expect(h.wakes).toHaveLength(before);
@@ -580,15 +589,17 @@ describe("GameHost with the real engine", () => {
     const h = setup([llm("Kimi"), llm("Sol")]);
     const reported = new Set<string>();
 
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
     await h.drain();
 
     const send = async (request: WakeRequest, endReason: string, text = ""): Promise<void> => {
       reported.add(`${request.seat}:${request.decisionId}`);
-      await h.host.wakeFinished({
-        ...report(request, endReason),
-        transcript: { ...transcriptFor(request), text },
-      });
+      await run(
+        h.host.wakeFinished({
+          ...report(request, endReason),
+          transcript: { ...transcriptFor(request), text },
+        }),
+      );
       await h.drain();
     };
 
@@ -638,7 +649,7 @@ describe("GameHost with the real engine", () => {
   it("aborts on request and greets spectators with the current sequence", async () => {
     const h = setup([llm("Opus"), llm("Sol")]);
 
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
     await h.drain();
 
     const hello = decodeMessage(h.host.helloMessage("g1"));
@@ -647,7 +658,7 @@ describe("GameHost with the real engine", () => {
       SpectatorMessage.guards.Hello(hello) && hello.lastSeq > 0 && hello.status === "running",
     ).toBe(true);
 
-    await h.host.abort("run cancelled");
+    await run(h.host.abort("run cancelled"));
     await h.drain();
 
     expect(h.host.status()).toBe("aborted");
@@ -658,7 +669,7 @@ describe("GameHost with the real engine", () => {
     const h = setup([random(), random()], { maxRounds: 1, holdArchive: true });
     const order: Array<string> = [];
 
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
 
     const draining = h.drain();
 
@@ -668,7 +679,7 @@ describe("GameHost with the real engine", () => {
 
     expect(h.archiveGate.calls).toBeGreaterThan(0);
 
-    const purged = h.host.purge().then(() => order.push("purged"));
+    const purged = run(h.host.purge()).then(() => order.push("purged"));
 
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(order).toEqual([]);
@@ -684,13 +695,13 @@ describe("GameHost with the real engine", () => {
   it("forgets a purged game: nothing stored, no alarm, late reports and calls write nothing", async () => {
     const h = setup([llm("Opus"), llm("Sol")]);
 
-    await h.host.start(h.start);
+    await run(h.host.start(h.start));
     await h.drain();
 
     const wake = h.lastWake();
 
-    await h.host.submit(h.call(wake, "c1", "note", { text: "Keep oranges." }));
-    await h.host.purge();
+    await run(h.host.submit(h.call(wake, "c1", "note", { text: "Keep oranges." })));
+    await run(h.host.purge());
 
     const tables = h.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table'");
 
@@ -701,14 +712,14 @@ describe("GameHost with the real engine", () => {
     expect(h.pendingAlarm()).toBeNull();
 
     // A wake still in flight reports and calls after the deletion: nothing is written.
-    await h.host.wakeFinished(report(wake, "answered"));
+    await run(h.host.wakeFinished(report(wake, "answered")));
 
-    expect(await h.host.done(h.call(wake, "c2", "done"))).toMatchObject({
+    expect(await run(h.host.done(h.call(wake, "c2", "done")))).toMatchObject({
       ok: false,
       terminal: true,
     });
 
-    await h.host.alarm();
+    await run(h.host.alarm());
     await h.drain();
 
     expect(h.wakeRows).toHaveLength(0);

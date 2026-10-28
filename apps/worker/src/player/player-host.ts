@@ -28,7 +28,7 @@ import {
   type WakeEndReason,
 } from "@mb/agent";
 import type { SeatActivity, WakeTranscript } from "@mb/api";
-import { Schema } from "effect";
+import { Cause, Effect, Schema } from "effect";
 
 import {
   type ModelCredentials,
@@ -37,14 +37,15 @@ import {
   WakeReport,
   WakeRequest,
 } from "../contracts.ts";
+import { UpstreamError } from "../errors.ts";
 import { jsonColumn, queryRows, type SqlPort } from "../sql.ts";
 
 export interface GameLinkPort {
-  readonly submit: (call: SeatCall) => Promise<SeatCallResult>;
-  readonly done: (call: SeatCall) => Promise<SeatCallResult>;
-  readonly inspect: (call: SeatCall) => Promise<SeatCallResult>;
-  readonly activity: (gameId: string, activity: SeatActivity) => Promise<void>;
-  readonly wakeFinished: (report: WakeReport) => Promise<void>;
+  readonly submit: (call: SeatCall) => Effect.Effect<SeatCallResult, UpstreamError>;
+  readonly done: (call: SeatCall) => Effect.Effect<SeatCallResult, UpstreamError>;
+  readonly inspect: (call: SeatCall) => Effect.Effect<SeatCallResult, UpstreamError>;
+  readonly activity: (gameId: string, activity: SeatActivity) => Effect.Effect<void, UpstreamError>;
+  readonly wakeFinished: (report: WakeReport) => Effect.Effect<void, UpstreamError>;
 }
 
 /** How a wake reaches its model: OpenRouter through pi-ai in production, faux in tests. */
@@ -58,10 +59,9 @@ export interface PlayerHostPorts {
   readonly sql: SqlPort;
   readonly game: GameLinkPort;
   /** Resolved before every wake (an own-key run's key is read from its RunDO then). */
-  readonly models: (request: WakeRequest) => Promise<ModelAccess>;
-  readonly setAlarm: (at: number | null) => Promise<void>;
+  readonly models: (request: WakeRequest) => Effect.Effect<ModelAccess, UpstreamError>;
+  readonly setAlarm: (at: number | null) => Effect.Effect<void>;
   readonly now: () => number;
-  readonly log: (message: string, cause?: unknown) => void;
   /** Conversation budget (default `DEFAULT_MEMORY_LIMITS`). */
   readonly memory?: MemoryLimits;
 }
@@ -124,6 +124,10 @@ const scrub = (text: string, secret: string | undefined): string =>
 const describeCause = (cause: unknown): string =>
   cause instanceof Error ? (cause.stack ?? cause.message) : String(cause);
 
+/** A failure's text without the wake's key, for a log line. */
+const scrubbedCause = (cause: unknown, apiKey: string | undefined): string =>
+  scrub(describeCause(cause instanceof UpstreamError ? cause.cause : cause), apiKey);
+
 export class PlayerHost {
   /** The game was deleted: a wake still in flight must not write anything more. */
   private purged = false;
@@ -133,55 +137,63 @@ export class PlayerHost {
   }
 
   /** GameDO → PlayerDO. Stores the request and returns; the alarm runs it. Idempotent. */
-  async wake(request: WakeRequest): Promise<void> {
-    this.ports.sql.exec(
-      "INSERT OR IGNORE INTO wakes (decision_id, status, created_at, request_json) VALUES (?, 'queued', ?, ?)",
-      request.decisionId,
-      this.ports.now(),
-      encodeRequest(request),
-    );
-    await this.ports.setAlarm(this.ports.now());
+  wake(request: WakeRequest): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      this.ports.sql.exec(
+        "INSERT OR IGNORE INTO wakes (decision_id, status, created_at, request_json) VALUES (?, 'queued', ?, ?)",
+        request.decisionId,
+        this.ports.now(),
+        encodeRequest(request),
+      );
+
+      return this.ports.setAlarm(this.ports.now());
+    });
   }
 
-  async alarm(): Promise<void> {
-    const rows = queryRows(
-      this.ports.sql,
-      WakeRow,
-      "SELECT decision_id, status, request_json, report_json FROM wakes WHERE status IN ('queued', 'running', 'reporting') ORDER BY created_at",
-    );
+  alarm(): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      const rows = queryRows(
+        this.ports.sql,
+        WakeRow,
+        "SELECT decision_id, status, request_json, report_json FROM wakes WHERE status IN ('queued', 'running', 'reporting') ORDER BY created_at",
+      );
 
-    for (const row of rows) {
-      const request = decodeRequest(row.request_json);
+      for (const row of rows) {
+        const request = decodeRequest(row.request_json);
 
-      if (row.report_json !== null) {
-        await this.send(decodeReport(row.report_json));
-        continue;
+        if (row.report_json !== null) {
+          yield* this.send(decodeReport(row.report_json));
+          continue;
+        }
+
+        if (row.status === "running") {
+          yield* this.report(request, this.emptyTranscript(request), 0, "interrupted", 0);
+          continue;
+        }
+
+        this.setStatus(request.decisionId, "running");
+
+        if (this.ports.now() > request.deadline) {
+          yield* this.report(request, this.emptyTranscript(request), 0, "expired", 0);
+          continue;
+        }
+
+        yield* this.run(request);
       }
-
-      if (row.status === "running") {
-        await this.report(request, this.emptyTranscript(request), 0, "interrupted", 0);
-        continue;
-      }
-
-      this.setStatus(request.decisionId, "running");
-
-      if (this.ports.now() > request.deadline) {
-        await this.report(request, this.emptyTranscript(request), 0, "expired", 0);
-        continue;
-      }
-
-      await this.run(request);
-    }
+    });
   }
 
   /** RunDO → PlayerDO when the run is deleted: drop every wake and the conversation. */
-  async purge(): Promise<void> {
-    this.purged = true;
-    this.ports.sql.transaction(() => {
-      this.ports.sql.exec("DELETE FROM wakes");
-      this.ports.sql.exec("DELETE FROM conversation");
+  purge(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      this.purged = true;
+      this.ports.sql.transaction(() => {
+        this.ports.sql.exec("DELETE FROM wakes");
+        this.ports.sql.exec("DELETE FROM conversation");
+      });
+
+      return this.ports.setAlarm(null);
     });
-    await this.ports.setAlarm(null);
   }
 
   /** The seat's conversation so far, from its rows. */
@@ -227,84 +239,109 @@ export class PlayerHost {
     });
   }
 
-  private async run(request: WakeRequest): Promise<void> {
-    const startedAt = new Date(this.ports.now()).toISOString();
-    let apiKey: string | undefined;
+  private run(request: WakeRequest): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      const startedAt = new Date(this.ports.now()).toISOString();
+      // The key is known once `models` answers; until then nothing can hold it.
+      let apiKey: string | undefined;
+      // The agent loop is Promise-based: its tool calls and activity run back in this context.
+      const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
 
-    try {
-      const access = await this.ports.models(request);
-      const before = this.conversation();
+      const wake = Effect.gen({ self: this }, function* () {
+        const access = yield* this.ports.models(request);
+        const before = this.conversation();
 
-      apiKey = access.apiKey;
+        apiKey = access.apiKey;
 
-      const result = await runWake({
-        identity: {
-          seat: request.seat,
-          decisionId: request.decisionId,
-          frame: request.frame,
-          round: request.round,
-          turn: request.turn,
-          reasons: request.reasons,
-        },
-        model: access.model,
-        streamFn: access.streamFn,
-        apiKey: access.apiKey,
-        reasoning: request.spec.reasoning,
-        maxOutputTokens: request.spec.maxOutputTokens,
-        systemPrompt: request.systemPrompt,
-        conversation: before,
-        message: request.message,
-        executor: this.executor(request),
-        limits: request.limits,
-        memory: this.ports.memory ?? DEFAULT_MEMORY_LIMITS,
-        onActivity: (activity) =>
-          this.ports.game.activity(request.gameId, activity).catch((cause: unknown) => {
-            this.ports.log("activity relay failed", scrub(describeCause(cause), apiKey));
-          }),
-        sessionId: `${request.gameId}:${request.seat}`,
-        signal: undefined,
-        now: this.ports.now,
+        const result = yield* Effect.tryPromise({
+          try: () =>
+            runWake({
+              identity: {
+                seat: request.seat,
+                decisionId: request.decisionId,
+                frame: request.frame,
+                round: request.round,
+                turn: request.turn,
+                reasons: request.reasons,
+              },
+              model: access.model,
+              streamFn: access.streamFn,
+              apiKey: access.apiKey,
+              reasoning: request.spec.reasoning,
+              maxOutputTokens: request.spec.maxOutputTokens,
+              systemPrompt: request.systemPrompt,
+              conversation: before,
+              message: request.message,
+              executor: this.executor(request, runPromise),
+              limits: request.limits,
+              memory: this.ports.memory ?? DEFAULT_MEMORY_LIMITS,
+              onActivity: (activity) =>
+                runPromise(
+                  this.ports.game
+                    .activity(request.gameId, activity)
+                    .pipe(
+                      Effect.catch((cause) =>
+                        Effect.logError("activity relay failed", scrubbedCause(cause, apiKey)),
+                      ),
+                    ),
+                ),
+              sessionId: `${request.gameId}:${request.seat}`,
+              signal: undefined,
+              now: this.ports.now,
+            }),
+          catch: (cause) => new UpstreamError({ operation: "runWake", cause }),
+        });
+
+        if (this.purged) return;
+
+        this.saveConversation(
+          before,
+          result.conversation,
+          result.compaction?.compacted === true,
+          apiKey,
+        );
+
+        const transcript: WakeTranscript = {
+          ...this.emptyTranscript(request),
+          startedAt,
+          finishedAt: new Date(this.ports.now()).toISOString(),
+          reasoning: result.reasoning,
+          text: scrub(transcriptText(result), apiKey),
+          toolCalls: result.toolCalls,
+          usage: result.usage,
+          invalidActions: result.invalidActions,
+          timedOut: result.timedOut,
+        };
+
+        yield* this.report(
+          request,
+          transcript,
+          result.latencyMs,
+          result.endReason,
+          result.compaction?.compacted === true ? 1 : 0,
+        );
       });
 
-      if (this.purged) return;
-
-      this.saveConversation(
-        before,
-        result.conversation,
-        result.compaction?.compacted === true,
-        apiKey,
+      yield* wake.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logError(
+            `wake ${request.gameId}/${request.seat}/${request.decisionId} failed`,
+            scrubbedCause(Cause.squash(cause), apiKey),
+          ).pipe(
+            Effect.andThen(
+              this.report(request, { ...this.emptyTranscript(request), startedAt }, 0, "failed", 0),
+            ),
+          ),
+        ),
       );
-
-      const transcript: WakeTranscript = {
-        ...this.emptyTranscript(request),
-        startedAt,
-        finishedAt: new Date(this.ports.now()).toISOString(),
-        reasoning: result.reasoning,
-        text: scrub(transcriptText(result), apiKey),
-        toolCalls: result.toolCalls,
-        usage: result.usage,
-        invalidActions: result.invalidActions,
-        timedOut: result.timedOut,
-      };
-
-      await this.report(
-        request,
-        transcript,
-        result.latencyMs,
-        result.endReason,
-        result.compaction?.compacted === true ? 1 : 0,
-      );
-    } catch (cause) {
-      this.ports.log(
-        `wake ${request.gameId}/${request.seat}/${request.decisionId} failed`,
-        scrub(describeCause(cause), apiKey),
-      );
-      await this.report(request, { ...this.emptyTranscript(request), startedAt }, 0, "failed", 0);
-    }
+    });
   }
 
-  private executor(request: WakeRequest): ToolExecutor {
-    return async (name, args, callId) => {
+  private executor(
+    request: WakeRequest,
+    runPromise: <A, E>(effect: Effect.Effect<A, E>) => Promise<A>,
+  ): ToolExecutor {
+    return (name, args, callId) => {
       const call: SeatCall = {
         gameId: request.gameId,
         seat: request.seat,
@@ -314,51 +351,55 @@ export class PlayerHost {
         args: toJson(args),
       };
 
-      if (name === "done") return this.ports.game.done(call);
+      if (name === "done") return runPromise(this.ports.game.done(call));
 
-      if (name === "inspect") return this.ports.game.inspect(call);
+      if (name === "inspect") return runPromise(this.ports.game.inspect(call));
 
-      return this.ports.game.submit(call);
+      return runPromise(this.ports.game.submit(call));
     };
   }
 
   /** Stores the report before sending it, so a failed delivery is retried with the same data. */
-  private async report(
+  private report(
     request: WakeRequest,
     transcript: WakeTranscript,
     latencyMs: number,
     endReason: WakeEndReason | "interrupted" | "expired" | "failed",
     compactions: number,
-  ): Promise<void> {
-    if (this.purged) return;
+  ): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      if (this.purged) return Effect.void;
 
-    const report: WakeReport = {
-      gameId: request.gameId,
-      seat: request.seat,
-      decisionId: request.decisionId,
-      transcript,
-      latencyMs,
-      endReason,
-      compactions,
-    };
+      const report: WakeReport = {
+        gameId: request.gameId,
+        seat: request.seat,
+        decisionId: request.decisionId,
+        transcript,
+        latencyMs,
+        endReason,
+        compactions,
+      };
 
-    this.ports.sql.exec(
-      "UPDATE wakes SET status = 'reporting', report_json = ? WHERE decision_id = ?",
-      encodeReport(report),
-      request.decisionId,
-    );
-    await this.send(report);
+      this.ports.sql.exec(
+        "UPDATE wakes SET status = 'reporting', report_json = ? WHERE decision_id = ?",
+        encodeReport(report),
+        request.decisionId,
+      );
+
+      return this.send(report);
+    });
   }
 
-  private async send(report: WakeReport): Promise<void> {
-    try {
-      await this.ports.game.wakeFinished(report);
-      this.setStatus(report.decisionId, "done");
-    } catch (cause) {
-      // The next alarm sends it again; GameDO ignores duplicates.
-      this.ports.log(`wakeFinished failed for ${report.gameId}/${report.seat}`, cause);
-      await this.ports.setAlarm(this.ports.now() + 10_000);
-    }
+  private send(report: WakeReport): Effect.Effect<void> {
+    return this.ports.game.wakeFinished(report).pipe(
+      Effect.andThen(Effect.sync(() => this.setStatus(report.decisionId, "done"))),
+      Effect.catch((cause) =>
+        // The next alarm sends it again; GameDO ignores duplicates.
+        Effect.logError(`wakeFinished failed for ${report.gameId}/${report.seat}`, cause).pipe(
+          Effect.andThen(Effect.suspend(() => this.ports.setAlarm(this.ports.now() + 10_000))),
+        ),
+      ),
+    );
   }
 
   private emptyTranscript(request: WakeRequest): WakeTranscript {
