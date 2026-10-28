@@ -7,6 +7,7 @@
  * `decisionId`, which the host adds); `commands.ts` maps them and `tools.test.ts` checks the
  * two stay aligned. Deeds may be named by printed name, slug or board position.
  */
+import { StringEnum } from "@earendil-works/pi-ai";
 import { GROUP_IDS, groupMembers, PROPERTIES, SEATS } from "@mb/engine";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
@@ -32,7 +33,9 @@ const PropertyParam = Type.Union(
   },
 );
 
-const GroupParam = Type.Enum(GROUP_IDS, {
+// Literal unions use pi-ai's `StringEnum` ({ type: "string", enum }): TypeBox's `Type.Enum`
+// emits no `type`, which strict providers refuse (Moonshot: "type is not defined").
+const GroupParam = StringEnum(GROUP_IDS, {
   description: `A color group, or railroads / utilities. ${GROUP_LIST}.`,
 });
 
@@ -58,7 +61,7 @@ const NoParams = Type.Object({});
 
 export const toolParameters = {
   inspect: Type.Object({
-    topic: Type.Enum(INSPECT_TOPICS, {
+    topic: StringEnum(INSPECT_TOPICS, {
       description:
         "table: the board and every player; deed: one title deed; player: one player's holdings; offers: the offers and threads of this session; rules: this game's settings.",
     }),
@@ -83,7 +86,7 @@ export const toolParameters = {
   unmortgage: Type.Object({ property: PropertyParam }),
   offer: Type.Object({
     to: Type.Optional(
-      Type.Enum(SEATS, {
+      StringEnum(SEATS, {
         description: "Seat the offer is addressed to. Omit for an open offer anyone may accept.",
       }),
     ),

@@ -84,6 +84,7 @@ export {
 } from "./render.ts";
 
 export {
+  DEFAULT_MAX_OUTPUT_TOKENS,
   runWake,
   transcriptText,
   type WakeEndReason,

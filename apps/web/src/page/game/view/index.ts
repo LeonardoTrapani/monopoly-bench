@@ -5,7 +5,7 @@ import { Option } from "effect";
 import { AsyncData, Submodel } from "foldkit";
 import type { Html, HtmlBuilder } from "foldkit/html";
 
-import { END_REASON_TEXT, timestamp } from "../../../domain/format.ts";
+import { END_REASON_TEXT, timestamp, usd } from "../../../domain/format.ts";
 import { turnIndexAt } from "../../../domain/replay.ts";
 import { gamesRouter, runHref } from "../../../route.ts";
 import { deedCard, errorView, gameStatusBadge, loadingView } from "../../../view/ui.ts";
@@ -92,10 +92,24 @@ const headerView = (h: HtmlBuilder<Message>, model: Model, summary: GameSummary 
               summary.endReason === null
                 ? h.empty
                 : h.span([], [END_REASON_TEXT[summary.endReason]]),
+              h.span(
+                [h.Class("num font-semibold text-ink"), h.Title("Model spend, all seats")],
+                [`${usd(gameCostUsd(summary))} spent`],
+              ),
+              summary.abortReason === null
+                ? h.empty
+                : h.p(
+                    [h.Class("w-full font-semibold text-red"), h.Role("status")],
+                    [`Aborted: ${summary.abortReason}`],
+                  ),
             ],
           ),
     ],
   );
+
+/** What every seat's model calls cost so far (the summary refreshes while the game streams). */
+const gameCostUsd = (summary: GameSummary): number =>
+  summary.seats.reduce((total, seat) => total + seat.costUsd, 0);
 
 const tabsView = (h: HtmlBuilder<Message>, model: Model): Html =>
   h.div(

@@ -20,7 +20,7 @@ import {
   type WakeLimits,
 } from "./executor.ts";
 import { DEFAULT_MEMORY_LIMITS, EMPTY_CONVERSATION } from "./memory.ts";
-import { runWake, type WakeInput } from "./run-wake.ts";
+import { DEFAULT_MAX_OUTPUT_TOKENS, runWake, type WakeInput } from "./run-wake.ts";
 import type { ToolName } from "./tools.ts";
 
 interface ExecutorCall {
@@ -412,5 +412,23 @@ describe("runWake", () => {
     await runWake(h.input({ maxOutputTokens: 777 }));
 
     expect(seen).toEqual(["777:test-key"]);
+  });
+
+  it("caps output tokens per request when the seat sets none", async () => {
+    const seen: Array<number | undefined> = [];
+
+    const answer: FauxResponseStep = (_context, options) => {
+      seen.push(options?.maxTokens);
+
+      return fauxAssistantMessage([fauxToolCall("done", {})], { stopReason: "toolUse" });
+    };
+
+    const h = harness([answer, answer]);
+    const model = h.faux.getModel();
+
+    await runWake(h.input({ model: { ...model, maxTokens: 943_718 } }));
+    await runWake(h.input({ model: { ...model, maxTokens: 8_192 } }));
+
+    expect(seen).toEqual([DEFAULT_MAX_OUTPUT_TOKENS, 8_192]);
   });
 });

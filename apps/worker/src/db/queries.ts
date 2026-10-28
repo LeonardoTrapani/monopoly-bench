@@ -59,6 +59,7 @@ const GameRow = Schema.Struct({
   turn: Schema.Int,
   round: Schema.Int,
   end_reason: EndReasonColumn,
+  abort_reason: Schema.NullOr(Schema.String),
   winner_seat: Schema.NullOr(Seat),
 });
 
@@ -78,6 +79,7 @@ const SeatRow = Schema.Struct({
   wakes: Schema.Int,
   invalid_actions: Schema.Int,
   timeouts: Schema.Int,
+  model_errors: Schema.Int,
 });
 
 const RUN_COLUMNS = `r.id, r.funding, r.name, r.created_at, r.status, r.players_count, r.seats_json, r.games_total, r.spent_usd, r.budget_usd,
@@ -85,7 +87,7 @@ const RUN_COLUMNS = `r.id, r.funding, r.name, r.created_at, r.status, r.players_
   (SELECT COUNT(*) FROM games g WHERE g.run_id = r.id AND g.status = 'running') AS games_running`;
 
 const GAME_COLUMNS =
-  "g.id, g.run_id, g.seed, g.status, g.players_count, g.started_at, g.finished_at, g.turn, g.round, g.end_reason, g.winner_seat";
+  "g.id, g.run_id, g.seed, g.status, g.players_count, g.started_at, g.finished_at, g.turn, g.round, g.end_reason, g.abort_reason, g.winner_seat";
 
 /** SQL: no seat of the game whose id is in `gameIdColumn` (a constant column name) is a bot. */
 const llmOnly = (gameIdColumn: string): string =>
@@ -124,7 +126,8 @@ const withSeats = Effect.fn("withSeats")(function* (games: ReadonlyArray<GameRow
         COALESCE(SUM(w.cost_usd), 0) AS cost_usd,
         COUNT(w.decision_id) AS wakes,
         COALESCE(SUM(w.invalid_actions), 0) AS invalid_actions,
-        COALESCE(SUM(w.timed_out), 0) AS timeouts
+        COALESCE(SUM(w.timed_out), 0) AS timeouts,
+        COALESCE(SUM(CASE WHEN w.end_reason = 'modelError' THEN 1 ELSE 0 END), 0) AS model_errors
       FROM seats s
       LEFT JOIN wakes w ON w.game_id = s.game_id AND w.seat = s.seat
       WHERE ${sql.in("s.game_id", ids)}
@@ -145,6 +148,7 @@ const withSeats = Effect.fn("withSeats")(function* (games: ReadonlyArray<GameRow
     turn: game.turn,
     round: game.round,
     endReason: game.end_reason,
+    abortReason: game.abort_reason,
     winnerSeat: game.winner_seat,
     seats: seatRows.flatMap((seat) =>
       seat.game_id === game.id
@@ -162,6 +166,7 @@ const withSeats = Effect.fn("withSeats")(function* (games: ReadonlyArray<GameRow
               wakes: seat.wakes,
               invalidActions: seat.invalid_actions,
               timeouts: seat.timeouts,
+              modelErrors: seat.model_errors,
             },
           ]
         : [],

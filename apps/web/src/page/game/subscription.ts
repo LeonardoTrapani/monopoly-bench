@@ -8,6 +8,9 @@ import { Connection, Speed, Timeline, type Model } from "./model.ts";
 /** Milliseconds between playback steps at 1×. */
 const STEP_MILLIS = 900;
 
+/** How often a streamed game refetches its summary (per-seat wakes, cost, model errors). */
+const SUMMARY_REFRESH_MILLIS = 15_000;
+
 const FeedTarget = Schema.Struct({ gameId: Schema.String, attempt: Schema.Int });
 
 const feedTarget = (model: Model): Option.Option<typeof FeedTarget.Type> => {
@@ -54,6 +57,25 @@ export const subscriptions = Subscription.make<Model, Message, Api>()((entry) =>
               ),
             ),
         }),
+    },
+  ),
+  /**
+   * Seat usage comes from D1, not from the feed: while the game streams, refetch it so the
+   * players' wakes, cost and model errors keep up.
+   */
+  summaryRefresh: entry(
+    { isStreaming: Schema.Boolean },
+    {
+      modelToDependencies: (model) => ({
+        isStreaming: Connection.guards.Open(model.connection),
+      }),
+      dependenciesToStream: ({ isStreaming }) =>
+        isStreaming
+          ? Stream.tick(Duration.millis(SUMMARY_REFRESH_MILLIS)).pipe(
+              Stream.drop(1),
+              Stream.map(() => Message.TickedSummaryRefresh()),
+            )
+          : Stream.empty,
     },
   ),
   /** The playback clock: one step per tick while playing or catching up with a live game. */

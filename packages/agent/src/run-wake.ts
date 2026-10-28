@@ -60,6 +60,13 @@ export interface WakeIdentity {
   readonly reasons: ReadonlyArray<string>;
 }
 
+/**
+ * Output tokens one request may ask for when the seat sets none. A wake writes a few thousand
+ * at most; without a cap pi-ai asks for the model's maximum (943 718 for Kimi K3.1 Pro), and
+ * OpenRouter refuses a request whose maximum output the account's credit cannot cover (402).
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
+
 export interface WakeInput {
   readonly identity: WakeIdentity;
   readonly model: Model<Api>;
@@ -67,6 +74,7 @@ export interface WakeInput {
   readonly streamFn: StreamFn;
   readonly apiKey: string | undefined;
   readonly reasoning: Reasoning | undefined;
+  /** Output cap per request; `DEFAULT_MAX_OUTPUT_TOKENS` (or the model's own, if lower) when unset. */
   readonly maxOutputTokens: number | undefined;
   readonly systemPrompt: string;
   /** The seat's conversation so far (an earlier `WakeResult.conversation`; empty at first). */
@@ -293,6 +301,12 @@ const recordAssistant = (message: AssistantMessage, ledger: WakeLedger): void =>
   }
 };
 
+const maxOutputTokensOf = (input: WakeInput): number => {
+  const cap = input.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+
+  return input.model.maxTokens > 0 ? Math.min(cap, input.model.maxTokens) : cap;
+};
+
 const endReasonOf = (ledger: WakeLedger, externallyAborted: boolean): WakeEndReason => {
   if (ledger.answered) return "answered";
 
@@ -319,7 +333,7 @@ const play = async (
 ): Promise<Conversation> => {
   const argsByCall = new Map<string, string>();
   const tools = TOOL_NAMES.map((name) => makeTool(name, input, ledger));
-  const maxTokens = input.maxOutputTokens;
+  const maxTokens = maxOutputTokensOf(input);
 
   // The system message (prompt and tool declarations) is added only to a new conversation; a
   // continuing one already starts with it, so every request extends the previous one.
@@ -331,10 +345,8 @@ const play = async (
       tools,
       messages: [...conversation.messages],
     },
-    streamFn: withReportedCost(
-      maxTokens === undefined
-        ? input.streamFn
-        : (model, context, options) => input.streamFn(model, context, { ...options, maxTokens }),
+    streamFn: withReportedCost((model, context, options) =>
+      input.streamFn(model, context, { ...options, maxTokens }),
     ),
     getApiKey: () => input.apiKey,
     toolExecution: "sequential",

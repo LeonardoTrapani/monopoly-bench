@@ -184,6 +184,17 @@ const playerCard = <M>(
                   `${seatSummary.wakes} wakes · $${seatSummary.costUsd.toFixed(3)} · ${seatSummary.invalidActions} invalid`,
                 ],
               ),
+          seatSummary === undefined || seatSummary.modelErrors === 0
+            ? h.empty
+            : h.span(
+                [
+                  h.Class("num rounded bg-red px-1 font-bold text-white"),
+                  h.Title("Wakes that ended because the model call failed: the default was played"),
+                ],
+                [
+                  `${seatSummary.modelErrors} model error${seatSummary.modelErrors === 1 ? "" : "s"}`,
+                ],
+              ),
           thinking === undefined
             ? h.empty
             : h.span(

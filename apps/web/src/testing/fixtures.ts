@@ -123,6 +123,7 @@ export const summary = (status: GameSummary["status"]): GameSummary => ({
   turn: 10,
   round: 5,
   endReason: null,
+  abortReason: null,
   winnerSeat: null,
   seats: [],
 });

@@ -30,7 +30,13 @@ import {
 } from "./commands.ts";
 import { CLOSED_DECISION, engineExecutor, inspectText } from "./engine-tools.ts";
 import { buildSystemPrompt, wakeLimitsOf } from "./prompt.ts";
-import { TOOL_NAMES, toolDescriptions, toolParameters, type ToolArgs } from "./tools.ts";
+import {
+  TOOL_NAMES,
+  toolDescriptions,
+  toolParameters,
+  type ToolArgs,
+  type ToolName,
+} from "./tools.ts";
 import { renderWakeMessage } from "./wake-message.ts";
 
 const isCommand = Schema.is(Command);
@@ -40,6 +46,26 @@ const commandFields = (kind: CommandKind): ReadonlyArray<string> =>
   Object.keys(Command.cases[kind].fields)
     .filter((field) => field !== "_tag" && field !== "seat" && field !== "decisionId")
     .sort();
+
+/** The parts of a tool's JSON schema these tests read: what a provider is sent. */
+interface ToolSchemaNode {
+  readonly type?: string;
+  readonly enum?: ReadonlyArray<string>;
+  readonly anyOf?: ReadonlyArray<ToolSchemaNode>;
+  readonly properties?: Readonly<Record<string, ToolSchemaNode>>;
+}
+
+/** A tool's parameters as the JSON a provider receives. */
+const sentSchema = (name: ToolName): ToolSchemaNode =>
+  JSON.parse(JSON.stringify(toolParameters[name]));
+
+/** Paths of properties (at any depth) that state neither a `type` nor an `anyOf` of types. */
+const untypedPaths = (path: string, node: ToolSchemaNode): ReadonlyArray<string> => [
+  ...(node.type === undefined && node.anyOf === undefined ? [path] : []),
+  ...Object.entries(node.properties ?? {}).flatMap(([key, child]) =>
+    untypedPaths(`${path}.${key}`, child),
+  ),
+];
 
 describe("tools against the engine", () => {
   it("exposes exactly the SPEC §6.3 tool set", () => {
@@ -66,8 +92,14 @@ describe("tools against the engine", () => {
   });
 
   it("offers exactly the engine's group and seat literals", () => {
-    expect(toolParameters.follow.properties.group.enum).toEqual([...GROUP_IDS]);
-    expect(toolParameters.offer.properties.to.enum).toEqual([...SEATS]);
+    expect(sentSchema("follow").properties?.group?.enum).toEqual([...GROUP_IDS]);
+    expect(sentSchema("offer").properties?.to?.enum).toEqual([...SEATS]);
+  });
+
+  it("states a type on every tool property, as strict providers require (Moonshot)", () => {
+    const untyped = TOOL_NAMES.flatMap((name) => untypedPaths(name, sentSchema(name)));
+
+    expect(untyped).toEqual([]);
   });
 
   it("builds commands the engine schema accepts, from names, slugs and positions", () => {

@@ -50,7 +50,14 @@ const sol = LlmSeat.make({ model: "openai/gpt-6.1-sol", label: "GPT-6.1 Sol" });
 
 const grok = LlmSeat.make({ model: "x-ai/grok-4.7", label: "Grok 4.7" });
 
-const runConfig: RunConfig = { name: "smoke", players: [haiku, sol], seeds: 2, budgetUsd: 10 };
+/** Two of its four games at once, so queueing is exercised (the default would start all four). */
+const runConfig: RunConfig = {
+  name: "smoke",
+  players: [haiku, sol],
+  seeds: 2,
+  concurrency: 2,
+  budgetUsd: 10,
+};
 
 const decode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S, text: string): S["Type"] =>
   Schema.decodeUnknownSync(Schema.fromJsonString(schema))(text);
@@ -227,6 +234,7 @@ const setup = () => {
         gameId: start.gameId,
         status: "finished",
         endReason: "turnCap",
+        abortReason: null,
         winnerSeat: winnerSeat.seat,
         finishedAt,
         turn: 40,

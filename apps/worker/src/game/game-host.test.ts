@@ -14,7 +14,7 @@ import type { FinishedGame, WakeRow } from "../db/writes.ts";
 import { planSeats } from "../runs/expand.ts";
 import { memorySqlPort } from "../testing/sqlite.ts";
 import { engineBinding } from "./engine-binding.ts";
-import { archiveKeys, GameHost, WAKE_GRACE_MS } from "./game-host.ts";
+import { archiveKeys, GameHost, MAX_CONSECUTIVE_MODEL_ERRORS, WAKE_GRACE_MS } from "./game-host.ts";
 
 const decodeMessage = Schema.decodeUnknownSync(Schema.fromJsonString(SpectatorMessage));
 
@@ -574,6 +574,65 @@ describe("GameHost with the real engine", () => {
     expect(h.host.status()).toBe("aborted");
     expect(h.outcomes[0]?.status).toBe("aborted");
     expect(h.outcomes[0]?.results.every((result) => result.rank === null)).toBe(true);
+  });
+
+  it("aborts the game once a seat's model fails wakes in a row, and says why", async () => {
+    const h = setup([llm("Kimi"), llm("Sol")]);
+    const reported = new Set<string>();
+
+    await h.host.start(h.start);
+    await h.drain();
+
+    const send = async (request: WakeRequest, endReason: string, text = ""): Promise<void> => {
+      reported.add(`${request.seat}:${request.decisionId}`);
+      await h.host.wakeFinished({
+        ...report(request, endReason),
+        transcript: { ...transcriptFor(request), text },
+      });
+      await h.drain();
+    };
+
+    const openWake = (seat: string): WakeRequest | undefined =>
+      h.wakes.findLast(
+        (wake) => wake.seat === seat && !reported.has(`${wake.seat}:${wake.decisionId}`),
+      );
+
+    /** Seat A's next open wake; seat B answers until there is one. */
+    const kimiWake = async (): Promise<WakeRequest> => {
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const wake = openWake("A");
+
+        if (wake !== undefined) return wake;
+
+        const other = openWake("B");
+
+        if (other === undefined) break;
+
+        await send(other, "answered");
+      }
+
+      throw new Error("seat A was never woken");
+    };
+
+    const modelError =
+      "[model error] 402: requires more credits, visit https://openrouter.ai/keys/abc";
+
+    // Two failures, an answered wake, then failures again: only a run of them in a row counts.
+    for (const endReason of ["modelError", "modelError", "answered"]) {
+      await send(await kimiWake(), endReason, endReason === "modelError" ? modelError : "");
+    }
+
+    for (let failures = 0; failures < MAX_CONSECUTIVE_MODEL_ERRORS; failures += 1) {
+      expect(h.host.status()).toBe("running");
+
+      await send(await kimiWake(), "modelError", modelError);
+    }
+
+    expect(h.host.status()).toBe("aborted");
+    expect(h.outcomes[0]?.status).toBe("aborted");
+    expect(h.finishes[0]?.abortReason).toBe(
+      "Kimi's model failed 3 wakes in a row: 402: requires more credits, visit <url>",
+    );
   });
 
   it("aborts on request and greets spectators with the current sequence", async () => {

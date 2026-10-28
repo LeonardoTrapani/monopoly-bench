@@ -44,7 +44,6 @@ const validForm: RunForm = {
   ],
   seeds: "4",
   maxRounds: "80",
-  concurrency: "",
   budgetUsd: "12.5",
   funding: "ownKey",
   openRouterKey: "sk-or-test",
@@ -124,7 +123,6 @@ describe("run form validation", () => {
       seats: [{ model: "acme/not-listed", label: "", reasoning: "off" }],
       seeds: "0",
       maxRounds: "abc",
-      concurrency: "40",
       budgetUsd: "-3",
       openRouterKey: " ",
     });
@@ -136,7 +134,6 @@ describe("run form validation", () => {
     ]);
     expect(errorsFor(errors, "seeds")).toHaveLength(1);
     expect(errorsFor(errors, "maxRounds")).toHaveLength(1);
-    expect(errorsFor(errors, "concurrency")).toHaveLength(1);
     expect(errorsFor(errors, "budgetUsd")).toHaveLength(1);
     expect(errorsFor(errors, "openRouterKey")).toEqual(["Paste your OpenRouter API key."]);
   });

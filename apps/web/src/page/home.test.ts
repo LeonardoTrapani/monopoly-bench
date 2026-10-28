@@ -174,6 +174,7 @@ describe("home view", () => {
                   turn: 12,
                   round: 6,
                   endReason: null,
+                  abortReason: null,
                   winnerSeat: null,
                   seats: [],
                 },

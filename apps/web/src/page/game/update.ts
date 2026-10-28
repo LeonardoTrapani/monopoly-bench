@@ -424,6 +424,11 @@ export const update = (model: Model, message: Message) =>
       }),
     }),
 
+    TickedSummaryRefresh: () => ({
+      model,
+      commands: [FetchSummary({ gameId: model.gameId })],
+    }),
+
     TickedPlayback: () =>
       Option.match(readyTimeline(model), {
         onNone: () => ({ model }),

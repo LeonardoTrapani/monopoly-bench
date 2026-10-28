@@ -309,6 +309,7 @@ const seatSummaries = (
           between(`${def.id}:${player.seat}:inv`, 0.5, 1.5),
       ),
       timeouts: intBetween(`${def.id}:${player.seat}:timeouts`, 0, 1),
+      modelErrors: 0,
     };
   });
 };
@@ -335,6 +336,7 @@ export const summarize = (
     turn: state.control.turn,
     round: state.control.gameRound,
     endReason: isFinished ? state.endReason : null,
+    abortReason: null,
     winnerSeat: isFinished ? state.winner : null,
     seats: seatSummaries(def, state, isFinished),
   };

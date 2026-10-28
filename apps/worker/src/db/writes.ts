@@ -299,6 +299,8 @@ export interface FinishedGame {
   readonly gameId: string;
   readonly status: Extract<GameStatus, "finished" | "aborted" | "failed">;
   readonly endReason: EndReason | null;
+  /** Why an aborted game was stopped (`GameHost.abortGame`); null otherwise. */
+  readonly abortReason: string | null;
   readonly winnerSeat: Seat | null;
   readonly finishedAt: string;
   readonly turn: number;
@@ -343,7 +345,8 @@ export const finishGame = Effect.fn("finishGame")(function* (game: FinishedGame)
   }));
 
   yield* batchAll([
-    sql`UPDATE games SET status = ${game.status}, end_reason = ${game.endReason}, winner_seat = ${game.winnerSeat},
+    sql`UPDATE games SET status = ${game.status}, end_reason = ${game.endReason},
+      abort_reason = ${game.abortReason}, winner_seat = ${game.winnerSeat},
       finished_at = COALESCE(finished_at, ${game.finishedAt}), turn = ${game.turn}, round = ${game.round},
       updated_at = ${game.finishedAt}
       WHERE id = ${game.gameId}`,

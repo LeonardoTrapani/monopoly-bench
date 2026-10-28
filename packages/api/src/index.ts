@@ -138,6 +138,8 @@ export const GameSeatSummary = Schema.Struct({
   wakes: Schema.Int,
   invalidActions: Schema.Int,
   timeouts: Schema.Int,
+  /** Wakes that ended because the model call failed (OpenRouter refused or errored). */
+  modelErrors: Schema.Int,
 });
 
 export type GameSeatSummary = typeof GameSeatSummary.Type;
@@ -153,6 +155,8 @@ export const GameSummary = Schema.Struct({
   turn: Schema.Int,
   round: Schema.Int,
   endReason: Schema.NullOr(Schema.Literals(["lastPlayerStanding", "turnCap", "aborted"])),
+  /** Why an aborted game was stopped (budget, cancelled run, a failing model); else null. */
+  abortReason: Schema.NullOr(Schema.String),
   winnerSeat: Schema.NullOr(Seat),
   seats: Schema.Array(GameSeatSummary),
 });

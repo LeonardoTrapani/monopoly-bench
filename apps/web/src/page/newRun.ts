@@ -98,7 +98,6 @@ export const Message = defineMessageUnion({
   UpdatedSeeds: { value: Schema.String },
   UpdatedMaxRounds: { value: Schema.String },
   SelectedTableFrequency: { value: Schema.String },
-  UpdatedConcurrency: { value: Schema.String },
   UpdatedBudget: { value: Schema.String },
   SelectedFunding: { value: Schema.String },
   UpdatedOpenRouterKey: { value: Schema.String },
@@ -311,9 +310,6 @@ export const update = (model: Model, message: Message) =>
           tableFrequency: (current) => Option.getOrElse(decodeFrequency(value), () => current),
         }),
       ),
-    }),
-    UpdatedConcurrency: ({ value }) => ({
-      model: editForm(model, (form) => modifyFields(form, { concurrency: () => value })),
     }),
     UpdatedBudget: ({ value }) => ({
       model: editForm(model, (form) => modifyFields(form, { budgetUsd: () => value })),
@@ -1013,15 +1009,6 @@ const gamesSection = (model: Model, errors: ReadonlyArray<FieldError>, h: HtmlBu
       smallSelect(h, "Open table", model.form.tableFrequency, FREQUENCY_OPTIONS, (value) =>
         Message.SelectedTableFrequency({ value }),
       ),
-      textField(h, {
-        id: "run-concurrency",
-        label: "Concurrency",
-        value: model.form.concurrency,
-        placeholder: "2",
-        hint: "Games played at the same time.",
-        errors: errorsFor(errors, "concurrency"),
-        onInput: (value) => Message.UpdatedConcurrency({ value }),
-      }),
       textField(h, {
         id: "run-budget",
         label: "Budget (USD)",

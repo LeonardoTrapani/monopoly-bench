@@ -33,6 +33,26 @@ export const WAKE_GRACE_MS = 30_000;
 
 const FINISH_RETRY_MS = 30_000;
 
+/**
+ * Wakes in a row that one seat may end on a model error (OpenRouter refused or failed the
+ * request) before the game is aborted: past this the seat is not playing, only taking the
+ * default, and an aborted game is never rated (SPEC §6.5).
+ */
+export const MAX_CONSECUTIVE_MODEL_ERRORS = 3;
+
+const MODEL_ERROR_MARKER = "[model error] ";
+
+/** The model error of a wake transcript, shortened and without URLs, for an abort reason. */
+const modelErrorOf = (text: string): string => {
+  const at = text.lastIndexOf(MODEL_ERROR_MARKER);
+
+  const message = (at === -1 ? "model error" : text.slice(at + MODEL_ERROR_MARKER.length))
+    .replace(/https?:\/\/\S+/g, "<url>")
+    .trim();
+
+  return message.length > 200 ? `${message.slice(0, 200)}…` : message;
+};
+
 export interface GameDbPort {
   readonly markRunning: (gameId: string, at: string) => Promise<void>;
   readonly progress: (gameId: string, turn: number, round: number, at: string) => Promise<void>;
@@ -324,6 +344,16 @@ export class GameHost<S, E extends EngineEvent, C> {
 
     if (charged.exhausted) this.setMeta("budgetExhausted", "1");
 
+    const modelErrors = this.modelErrorStreak(report);
+
+    if (modelErrors >= MAX_CONSECUTIVE_MODEL_ERRORS && this.status() === "running") {
+      const label = this.seatOf(report.seat)?.label ?? report.seat;
+
+      this.abortGame(
+        `${label}'s model failed ${modelErrors} wakes in a row: ${modelErrorOf(transcript.text)}`,
+      );
+    }
+
     // Once the game stopped, its archive may already hold this seat's transcripts (the last
     // wake often reports after the game ends): refresh it once the game is archived.
     if (this.status() !== "running") {
@@ -357,7 +387,7 @@ export class GameHost<S, E extends EngineEvent, C> {
   async abort(reason: string): Promise<void> {
     if (this.status() !== "running") return;
 
-    this.applyCommand(this.binding.engine.abortCommand(reason), true);
+    this.abortGame(reason);
     await this.kick();
   }
 
@@ -827,7 +857,7 @@ export class GameHost<S, E extends EngineEvent, C> {
     // A bot leaving its decision open must not stall the game: take the default.
     if (!this.applyCommand(engine.timeoutCommand(decision.seat, decision.decisionId), false)) {
       this.ports.log(`Default refused for ${decision.seat} ${decision.decisionId}`);
-      this.applyCommand(engine.abortCommand("engine refused the default action"), true);
+      this.abortGame("engine refused the default action");
     }
   }
 
@@ -849,7 +879,7 @@ export class GameHost<S, E extends EngineEvent, C> {
     if (known !== undefined) return;
 
     if (this.getMeta("budgetExhausted") === "1") {
-      this.applyCommand(this.binding.engine.abortCommand("budget exhausted"), true);
+      this.abortGame("budget exhausted");
 
       return;
     }
@@ -1071,6 +1101,7 @@ export class GameHost<S, E extends EngineEvent, C> {
             engine: engine.version,
             status,
             endReason: standings.endReason,
+            abortReason: status === "aborted" ? (this.getMeta("abortReason") ?? null) : null,
             winner: standings.winner,
             finishedAt,
             seats: game.seats.map((seat) => ({
@@ -1101,6 +1132,7 @@ export class GameHost<S, E extends EngineEvent, C> {
         gameId: game.gameId,
         status,
         endReason: standings.endReason ?? "aborted",
+        abortReason: status === "aborted" ? (this.getMeta("abortReason") ?? null) : null,
         winnerSeat: standings.winner,
         finishedAt,
         turn: pending.turn,
@@ -1203,6 +1235,33 @@ export class GameHost<S, E extends EngineEvent, C> {
 
   private lastSeq(): number {
     return queryFirst(this.ports.sql, SeqRow, "SELECT MAX(seq) AS seq FROM events")?.seq ?? 0;
+  }
+
+  /** End the game as aborted, keeping the first reason for its summary. */
+  private abortGame(reason: string): void {
+    if (this.getMeta("abortReason") === undefined) this.setMeta("abortReason", reason);
+
+    this.applyCommand(this.binding.engine.abortCommand(reason), true);
+  }
+
+  /**
+   * The seat's current run of wakes that ended on a model error, counting this report. Kept as
+   * decision ids, so a report processed twice counts once; any other ending resets it.
+   */
+  private modelErrorStreak(report: WakeReport): number {
+    const key = `modelErrors:${report.seat}`;
+
+    if (report.endReason !== "modelError") {
+      this.ports.sql.exec("DELETE FROM meta WHERE key = ?", key);
+
+      return 0;
+    }
+
+    const streak = new Set((this.getMeta(key) ?? "").split(",").filter((id) => id !== ""));
+    streak.add(report.decisionId);
+    this.setMeta(key, [...streak].join(","));
+
+    return streak.size;
   }
 
   private seatOf(seat: string): PlannedSeat | undefined {

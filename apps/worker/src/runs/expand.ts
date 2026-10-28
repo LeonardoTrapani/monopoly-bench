@@ -12,7 +12,12 @@ import type { PlannedSeat } from "../contracts.ts";
 
 export const SEAT_LETTERS: ReadonlyArray<Seat> = ["A", "B", "C", "D", "E", "F"];
 
-export const DEFAULT_CONCURRENCY = 2;
+/**
+ * Games a run plays at once unless its config says otherwise: every game of a usual run (4
+ * models × 1–4 seeds) starts at once; only larger runs queue, so OpenRouter rate limits (429s
+ * end wakes on a model error) are not hit by hundreds of seats at the same moment.
+ */
+export const DEFAULT_CONCURRENCY = 16;
 
 export interface PlannedGame {
   readonly gameId: string;

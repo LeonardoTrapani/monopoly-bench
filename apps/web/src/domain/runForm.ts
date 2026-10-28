@@ -30,7 +30,6 @@ export const RunForm = Schema.Struct({
   seeds: Schema.String,
   maxRounds: Schema.String,
   tableFrequency: TableFrequency,
-  concurrency: Schema.String,
   budgetUsd: Schema.String,
   /** Who pays: the creator's OpenRouter key (`ownKey`) or the server (`server`, bench key). */
   funding: RunFunding,
@@ -86,7 +85,6 @@ export const defaultForm = (apiKey: string): RunForm => ({
   seeds: "1",
   maxRounds: "",
   tableFrequency: "everyTurn",
-  concurrency: "2",
   budgetUsd: "50",
   funding: apiKey === "" ? "ownKey" : "server",
   openRouterKey: "",
@@ -302,16 +300,6 @@ export const validateRunForm = (
 
   if (Result.isFailure(maxRounds)) errors.push(maxRounds.failure);
 
-  const concurrency = optionalInteger(
-    form.concurrency,
-    "concurrency",
-    1,
-    16,
-    "Concurrency must be a whole number from 1 to 16, or empty.",
-  );
-
-  if (Result.isFailure(concurrency)) errors.push(concurrency.failure);
-
   const budget = Option.filter(parseAmount(form.budgetUsd), (value) => inRange(value, 0, 10_000));
 
   if (Option.isNone(budget))
@@ -329,7 +317,6 @@ export const validateRunForm = (
     Option.isNone(seeds) ||
     Option.isNone(budget) ||
     Result.isFailure(maxRounds) ||
-    Result.isFailure(concurrency) ||
     Result.isFailure(payment)
   ) {
     return Result.fail(errors);
@@ -351,12 +338,7 @@ export const validateRunForm = (
     onSome: (value) => ({ ...named, maxRounds: value }),
   });
 
-  const candidate = Option.match(concurrency.success, {
-    onNone: () => capped,
-    onSome: (value) => ({ ...capped, concurrency: value }),
-  });
-
-  return Result.match(decodeRunConfig(candidate), {
+  return Result.match(decodeRunConfig(capped), {
     onFailure: (error) => Result.fail([{ field: "form", message: error.message }]),
     onSuccess: (config) => Result.succeed({ config, payment: payment.success }),
   });

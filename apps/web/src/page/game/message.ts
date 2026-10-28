@@ -20,6 +20,7 @@ export const Message = defineMessageUnion({
   FailedFeed: { error: Schema.String },
   CompletedWaitBeforeReconnect: {},
   TickedPlayback: {},
+  TickedSummaryRefresh: {},
   ClickedPlay: {},
   ClickedPause: {},
   ClickedStepForward: {},

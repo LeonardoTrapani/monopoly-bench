@@ -475,6 +475,14 @@ attempt is the rule); `MortgagedTransfer` → `KeepMortgage`; `RaiseFunds` debto
 automatic liquidation (sell buildings evenly from the most expensive set, then mortgage
 deeds from the cheapest), then pay or bankruptcy. Each default is recorded.
 
+A wake that ends because the model call failed (OpenRouter refused or errored the request,
+`endReason: "modelError"`) also takes the default. After 3 such wakes in a row from one seat
+(`MAX_CONSECUTIVE_MODEL_ERRORS`) the game is aborted, so a seat whose model does not answer is
+never rated as if it played; the game's `abortReason` names the seat and the error, and seats
+count their `modelErrors`. Every request asks for at most 32 000 output tokens
+(`DEFAULT_MAX_OUTPUT_TOKENS`, or the model's own maximum if lower): OpenRouter refuses a
+request whose maximum output the account's credit cannot cover.
+
 ### 6.6 Seat kinds
 
 - `llm`: `{ model: <OpenRouter id>, label, reasoning?: "off" | "low" | "medium" | "high", maxOutputTokens? }`
@@ -602,7 +610,7 @@ RunConfig {
   seeds: number                  // number of seeds; games = seeds × players (cyclic seat rotation)
   maxRounds?: number             // turn cap override
   tableFrequency?: "everyRoll" | "everyTurn" | "everyRound" | "off"
-  concurrency?: number           // games at once (default 2)
+  concurrency?: number           // games at once (default 16, the most allowed)
   budgetUsd: number              // hard cap: no new wakes after it is reached; games abort
 }
 ```
@@ -718,8 +726,10 @@ Routes:
 | memory: `compactAtTokens` (§6.2)            | 80 000 (≤ 60% of context)   |
 | memory: wakes kept / summary output tokens  | up to 6 / 1 500             |
 | minimum context window for a seat           | 32 000                      |
+| output tokens per request (default cap)     | 32 000                      |
+| model errors in a row before an abort       | 3                           |
 | catalog cache (§6.7)                        | 1 h (bundled list: 5 min)   |
-| run `concurrency`                           | 2                           |
+| run `concurrency`                           | 16 (not in the run form)    |
 
 **`maxRounds` calibration.** `bun apps/cli/src/main.ts calibrate --games 200 --cap 400
 --seed cal`: 200 all-heuristic games per player count, default rules, natural length in
