@@ -341,3 +341,24 @@ export const defaultModelCatalog: ReadonlyArray<ModelCatalogEntry> = [
   { model: "mistralai/mistral-large-4-0", label: "Mistral Large 4", provider: "Mistral" },
   { model: "minimax/minimax-m3", label: "MiniMax M3", provider: "MiniMax" },
 ];
+
+/**
+ * Messages on the spectator WebSocket (`GET /api/games/:id/ws`), server → client only.
+ * `Hello` is sent on connect; `Events` carries engine `GameEvent`s (JSON, decode them with
+ * `@mb/engine`); `Activity` carries live seat activity; `Status` reports game status changes.
+ * The REST endpoints `/api/games/:id/events` and `/api/games/:id/transcripts` return NDJSON
+ * (one engine event / one `WakeTranscript` per line).
+ */
+export const SpectatorMessage = Schema.TaggedUnion({
+  Hello: {
+    gameId: Schema.String,
+    status: GameStatus,
+    lastSeq: Schema.Int,
+    view: Schema.NullOr(Schema.Json),
+  },
+  Events: { events: Schema.Array(Schema.Json) },
+  Activity: { activity: SeatActivity },
+  Status: { status: GameStatus },
+});
+
+export type SpectatorMessage = typeof SpectatorMessage.Type;

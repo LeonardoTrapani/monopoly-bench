@@ -5,12 +5,11 @@
  */
 import { TOOL_NAMES } from "@mb/agent";
 import {
-  GameStatus,
   LlmSeat,
   PlayersCount,
   Seat,
-  SeatActivity,
   SeatSpec,
+  SpectatorMessage,
   TableFrequency,
   WakeTranscript,
 } from "@mb/api";
@@ -163,18 +162,6 @@ export type ChargeResult = typeof ChargeResult.Type;
  * sent on connect; clients then load `GET /api/games/:id/events?since=` and apply `Events`
  * whose `seq` is larger than what they have. Event and view payloads are the engine's JSON.
  */
-export const SpectatorMessage = Schema.TaggedUnion({
-  Hello: {
-    gameId: Schema.String,
-    status: GameStatus,
-    lastSeq: Schema.Int,
-    view: Schema.NullOr(Schema.Json),
-  },
-  Events: { events: Schema.Array(Schema.Json) },
-  Activity: { activity: SeatActivity },
-  Status: { status: GameStatus },
-});
-
-export type SpectatorMessage = typeof SpectatorMessage.Type;
+export { SpectatorMessage };
 
 export const encodeSpectatorMessage = Schema.encodeSync(Schema.fromJsonString(SpectatorMessage));
