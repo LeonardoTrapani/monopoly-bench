@@ -4,15 +4,8 @@
  * Public HTTP shapes live in `@mb/api`.
  */
 import { TOOL_NAMES } from "@mb/agent";
-import {
-  LlmSeat,
-  PlayersCount,
-  Seat,
-  SeatSpec,
-  SpectatorMessage,
-  TableFrequency,
-  WakeTranscript,
-} from "@mb/api";
+import { LlmSeat, PlayersCount, Seat, SeatSpec, SpectatorMessage, WakeTranscript } from "@mb/api";
+import { GameConfig } from "@mb/engine";
 import { Schema } from "effect";
 
 export const CompetitorKind = Schema.Literals(["llm", "bot"]);
@@ -62,12 +55,10 @@ export const GameStart = Schema.Struct({
   gameId: Schema.String,
   runId: Schema.String,
   gameIndex: Schema.Int,
-  seed: Schema.String,
-  playersCount: PlayersCount,
+  /** The engine's game config (seed, seats, rules incl. wake limits): enough to replay. */
+  config: GameConfig,
+  /** Seat specs in seat order (how each seat is played: bot policy or LLM model). */
   seats: Schema.Array(PlannedSeat),
-  maxRounds: Schema.Int,
-  tableFrequency: TableFrequency,
-  limits: WakeLimitsSchema,
   /** Price snapshot of the run's LLM models, taken when the run was created. */
   listings: Schema.Array(ModelListing),
   budgetExhausted: Schema.Boolean,

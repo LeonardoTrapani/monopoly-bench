@@ -8,21 +8,17 @@ import type { Seat, SeatActivity } from "@mb/api";
 import type { WorkerEnv } from "../../alchemy.run.ts";
 import type { GameStart, SeatCall, SeatCallResult, WakeReport } from "../contracts.ts";
 import { finishGame, gameProgress, markGameRunning, recordWake } from "../db/writes.ts";
+import type { Command, GameEvent, GameState } from "@mb/engine";
+
+import { engineBinding } from "../game/engine-binding.ts";
 import { GameHost } from "../game/game-host.ts";
-import {
-  stubEngineBinding,
-  type StubCommand,
-  type StubEvent,
-  type StubState,
-} from "../game/stub-engine.ts";
 import { durableAlarm, durableSql, logError, runD1 } from "./runtime.ts";
 
 export class GameDO extends DurableObject<WorkerEnv> {
-  private readonly host: GameHost<StubState, StubEvent, StubCommand>;
+  private readonly host: GameHost<GameState, GameEvent, Command>;
 
   constructor(ctx: DurableObjectState, env: WorkerEnv) {
     super(ctx, env);
-    // Phase 2: replace `stubEngineBinding` with the `@mb/engine` binding (README, "Phase 2").
     this.host = new GameHost(
       {
         sql: durableSql(ctx.storage),
@@ -60,7 +56,7 @@ export class GameDO extends DurableObject<WorkerEnv> {
         now: Date.now,
         log: logError,
       },
-      stubEngineBinding,
+      engineBinding,
     );
   }
 
@@ -102,6 +98,10 @@ export class GameDO extends DurableObject<WorkerEnv> {
 
   transcripts(seat: Seat | null): string {
     return this.host.transcripts(seat);
+  }
+
+  config(): string | null {
+    return this.host.config();
   }
 
   override alarm(): Promise<void> {

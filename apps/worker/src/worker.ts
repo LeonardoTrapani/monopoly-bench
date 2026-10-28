@@ -40,6 +40,12 @@ const apiDeps = (env: WorkerEnv): ApiDeps => ({
 
       return object === null ? null : object.text();
     },
+    liveConfig: (gameId) => env.GAMES.getByName(gameId).config(),
+    archivedConfig: async (gameId) => {
+      const object = await env.ARCHIVE.get(archiveKeys.config(gameId));
+
+      return object === null ? null : object.text();
+    },
     spectate: (gameId, request) => env.GAMES.getByName(gameId).fetch(request),
   },
   listings: (modelIds) => fetchListings(modelIds, fetch, Date.now()),

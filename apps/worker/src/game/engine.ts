@@ -1,23 +1,14 @@
 /**
- * The seam between GameDO and the rules engine (SPEC.md §4.1, §4.4–4.6).
- *
- * GameDO only talks to these interfaces. Phase 1 binds them to a placeholder dice game
- * (`stub-engine.ts`); phase 2 binds them to `@mb/engine` (rules), `@mb/bots` (bot seats) and
- * the view renderers of `@mb/agent`, without touching GameDO. See apps/worker/README.md.
+ * The seam between GameDO and the game (SPEC.md §4.1, §4.4–4.6, §6). GameDO only talks to
+ * these interfaces; `engine-binding.ts` binds them to `@mb/engine` (rules), `@mb/bots` (bot
+ * seats) and `@mb/agent` (tools, prompts, wake messages). Tests may bind them to anything.
  */
-import type { ToolArgs, ToolName } from "@mb/agent";
-import type { BotPolicy, Seat, TableFrequency } from "@mb/api";
+import type { CommandTool, ToolArgs, WakeLimits } from "@mb/agent";
+import type { BotPolicy, Seat } from "@mb/api";
+import type { GameConfig } from "@mb/engine";
 import type { Result, Schema } from "effect";
 
 export type Json = Schema.Json;
-
-export interface EngineGameConfig {
-  readonly seed: string;
-  /** Seat letters in turn order. */
-  readonly seats: ReadonlyArray<Seat>;
-  readonly maxRounds: number;
-  readonly tableFrequency: TableFrequency;
-}
 
 /** SPEC §4.5: every event carries its sequence number and turn. */
 export interface EngineEvent {
@@ -29,15 +20,13 @@ export interface EngineEvent {
 export interface PendingDecision {
   readonly seat: Seat;
   readonly decisionId: string;
-  /** Frame name: "Table", "JailChoice", "BuyChoice", "Auction", "BuildingAuction", "RaiseFunds", "MortgagedTransfer". */
+  /** Frame kind: "Table", "RaiseFunds", "JailChoice", "BuyChoice", "Auction", … */
   readonly frame: string;
   readonly round: number;
-  /** Wake reasons (SPEC §5.3): "round1", "addressed", "inThread", "follows", "openCall", "debtor", … */
+  /** Wake reasons (SPEC §5.3): "opening", "addressed", "inThread", "follows", … */
   readonly reasons: ReadonlyArray<string>;
   /** Shared by the rounds of one session; the agent conversation continues while it is equal. */
   readonly sessionKey: string;
-  /** Legal command kinds for this seat, as tool names. */
-  readonly legal: ReadonlyArray<ToolName>;
 }
 
 export interface Pending {
@@ -50,8 +39,7 @@ export type EndReason = "lastPlayerStanding" | "turnCap" | "aborted";
 
 export interface SeatStanding {
   readonly seat: Seat;
-  /** 1 = winner; null while the game runs or when it was aborted. */
-  readonly rank: number | null;
+  readonly rank: number;
   readonly netWorth: number;
   readonly cash: number;
   readonly bankruptAtTurn: number | null;
@@ -69,14 +57,17 @@ export interface Applied<S, E> {
   readonly events: ReadonlyArray<E>;
 }
 
-/** The pure rules engine: `@mb/engine` in phase 2. */
+/** The pure rules engine. */
 export interface GameEngine<S, E extends EngineEvent, C> {
   readonly version: string;
-  readonly newGame: (config: EngineGameConfig) => Applied<S, E>;
-  /** `decide` + fold `evolve`; the error is the engine's reason, shown to the model. */
+  readonly newGame: (config: GameConfig) => Applied<S, E>;
+  /** `decide` + fold `evolve`; the error is the engine's `IllegalCommand` reason. */
   readonly apply: (state: S, command: C) => Result.Result<Applied<S, E>, string>;
+  /** Folds stored events onto a snapshot (`evolve`). */
+  readonly fold: (state: S, events: ReadonlyArray<E>) => S;
   readonly pending: (state: S) => Pending;
-  readonly playerView: (state: S, seat: Seat) => Json;
+  /** Cheap staleness check: is `seat` still asked `decisionId`? */
+  readonly isAwaiting: (state: S, seat: Seat, decisionId: string) => boolean;
   readonly spectatorView: (state: S) => Json;
   readonly digest: (
     events: ReadonlyArray<E>,
@@ -91,12 +82,13 @@ export interface GameEngine<S, E extends EngineEvent, C> {
   readonly abortCommand: (reason: string) => C;
 }
 
-/** JSON codec of the engine's Effect schemas, for SQLite, R2 and the wire. */
+/** JSON codec of the engine's schemas, for SQLite, R2 and the wire. */
 export interface EngineCodec<S, E> {
   readonly encodeState: (state: S) => Json;
   readonly decodeState: (json: Json) => S;
   readonly encodeEvent: (event: E) => Json;
   readonly decodeEvent: (json: Json) => E;
+  readonly encodeConfig: (config: GameConfig) => Json;
 }
 
 export interface OfferRecord {
@@ -117,6 +109,7 @@ export interface AuctionRecord {
   readonly auctionId: string;
   readonly turn: number;
   readonly kind: "property" | "building";
+  /** Deed slug, or "house" / "hotel" for building auctions. */
   readonly property: string;
   readonly listPrice: number;
   readonly winner: Seat | null;
@@ -140,28 +133,35 @@ export interface GameRecords {
   readonly counters: ReadonlyArray<SeatCounters>;
 }
 
-/** Text for the wake message of one decision (SPEC §6.2); the agent package assembles it. */
-export interface WakeContext {
-  readonly view: string;
-  readonly question: string;
-  readonly offers: string;
+export interface SeatLimits extends WakeLimits {
+  readonly notesMaxChars: number;
 }
 
-/**
- * Glue between the engine, bots and the agent tools. Phase 2: commands from tool arguments
- * (with the engine's command schemas), `@mb/bots` policies, and the agent's view renderers.
- */
+/** Everything seat-facing: tools → commands, bots, prompts, wake messages, statistics. */
 export interface SeatAdapter<S, E, C> {
-  readonly commandFromTool: <N extends ToolName>(
-    state: S,
+  readonly commandFromTool: <N extends CommandTool>(
     decision: PendingDecision,
     tool: N,
     args: ToolArgs<N>,
   ) => Result.Result<C, string>;
-  readonly botCommand: (state: S, decision: PendingDecision, policy: BotPolicy) => C;
-  readonly wakeContext: (state: S, decision: PendingDecision) => WakeContext;
+  /** The commands a bot submits for one wake, ending with an answering one. */
+  readonly botCommands: (
+    state: S,
+    decision: PendingDecision,
+    policy: BotPolicy,
+  ) => ReadonlyArray<C>;
+  readonly limits: (state: S) => SeatLimits;
+  readonly systemPrompt: (state: S) => string;
+  readonly wakeMessage: (
+    state: S,
+    decision: PendingDecision,
+    digest: ReadonlyArray<string>,
+    notes: string,
+  ) => string;
   readonly inspect: (state: S, seat: Seat, args: ToolArgs<"inspect">) => string;
-  readonly records: (state: S, events: ReadonlyArray<E>) => GameRecords;
+  /** What the model reads after one of its commands was accepted. */
+  readonly outcome: (events: ReadonlyArray<E>, seat: Seat) => string;
+  readonly records: (events: ReadonlyArray<E>) => GameRecords;
 }
 
 export interface EngineBinding<S, E extends EngineEvent, C> {

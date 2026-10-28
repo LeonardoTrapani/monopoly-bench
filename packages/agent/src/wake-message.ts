@@ -1,74 +1,91 @@
 /**
- * Wake message rendering (SPEC.md §6.2). Built only from data: the host passes the engine's
- * digest lines, the seat's rendered view, the question, the offers and the notes, and this
- * module assembles them in a fixed order. No randomness, no clock.
+ * Wake message (SPEC.md §6.2), built only from data: what happened since the seat's last wake
+ * (`digest` from its cursor), the seat's `playerView`, the question with its legal tools, the
+ * session's offers and threads, and the seat's notes. No randomness, no clock.
  */
-import type { Seat } from "@mb/api";
+import type { DecisionRequest, PlayerView, WakeReason } from "@mb/engine";
 
-export interface RosterEntry {
-  readonly seat: Seat;
-  readonly label: string;
-}
+import { toolsForKinds } from "./commands.ts";
+import { renderOffers, renderPlayerView } from "./render.ts";
 
-export interface WakeQuestion {
-  /** Engine frame name, e.g. "Table", "BuyChoice", "Auction". */
-  readonly frame: string;
-  readonly round: number;
-  /** Why this seat was woken (SPEC §5.3), e.g. "addressed", "follows", "debtor". */
-  readonly reasons: ReadonlyArray<string>;
-  /** Legal command kinds for this seat, as tool names. */
-  readonly legal: ReadonlyArray<string>;
-  /** One or two sentences stating what must be decided. */
-  readonly prompt: string;
-}
+/** Digest lines beyond this are summarized, oldest first. */
+export const MAX_DIGEST_LINES = 80;
 
-export interface WakeMessageParts {
-  readonly seat: Seat;
-  readonly roster: ReadonlyArray<RosterEntry>;
-  readonly turn: number;
-  /** `digest(events, cursor, seat)` lines: what happened since the seat's last wake. */
+const REASON_TEXT: Readonly<Record<WakeReason, string>> = {
+  opening: "the session opened",
+  addressed: "something was addressed to you",
+  inThread: "a new offer in a thread you are part of",
+  follows: "a new offer involves a group you follow",
+  openCall: "a new open offer",
+  debtor: "you owe money",
+  bidder: "you are bidding",
+  active: "it is your decision",
+};
+
+export interface WakeMessageInput {
+  readonly view: PlayerView;
+  readonly request: DecisionRequest;
+  /** `digest(events, cursor, seat)`: lines since this seat's previous wake. */
   readonly digest: ReadonlyArray<string>;
-  /** The seat's `playerView`, rendered compactly. */
-  readonly view: string;
-  readonly question: WakeQuestion;
-  /** Open offers and threads with comments, rendered. Empty when there are none. */
-  readonly offers: string;
   readonly notes: string;
 }
 
 const section = (title: string, body: string): string => `## ${title}\n${body}`;
 
-const rosterLine = (parts: WakeMessageParts): string =>
-  parts.roster
-    .map((entry) =>
-      entry.seat === parts.seat ? `${entry.seat} (you)` : `${entry.seat}: ${entry.label}`,
-    )
-    .join(", ");
+const digestText = (lines: ReadonlyArray<string>): string => {
+  if (lines.length === 0) return "Nothing new.";
 
-export const renderWakeMessage = (parts: WakeMessageParts): string => {
-  const { question } = parts;
-
-  const reasons =
-    question.reasons.length === 0 ? "" : ` Woken because: ${question.reasons.join(", ")}.`;
+  const kept = lines.slice(-MAX_DIGEST_LINES);
+  const omitted = lines.length - kept.length;
 
   return [
-    `You are seat ${parts.seat}. Players: ${rosterLine(parts)}.`,
-    section(
-      "Since your last wake",
-      parts.digest.length === 0
-        ? "Nothing new."
-        : parts.digest.map((line) => `- ${line}`).join("\n"),
-    ),
-    section("Table", parts.view),
+    ...(omitted > 0 ? [`(${omitted} earlier lines omitted)`] : []),
+    ...kept.map((line) => `- ${line}`),
+  ].join("\n");
+};
+
+export const renderWakeMessage = (input: WakeMessageInput): string => {
+  const { view, request } = input;
+  const me = view.players.find((player) => player.seat === view.seat);
+
+  const others = view.players
+    .filter((player) => player.seat !== view.seat)
+    .map((player) => `${player.seat} ${player.label}`)
+    .join(", ");
+
+  // Table questions already say why a later round woke the seat.
+  const reasons =
+    request.frame === "Table"
+      ? ""
+      : request.reasons.map((reason) => REASON_TEXT[reason]).join("; ");
+
+  const legal = toolsForKinds(request.allowed);
+
+  const answering = toolsForKinds(
+    request.terminal.filter((kind) => request.allowed.includes(kind)),
+  );
+
+  return [
+    `You are seat ${view.seat} (${me?.label ?? view.seat}). Opponents: ${others}.`,
+    section("Since your last wake", digestText(input.digest)),
+    section("Table", renderPlayerView(view)),
     section(
       "Decision",
-      `Turn ${parts.turn}, ${question.frame}, round ${question.round}.${reasons}\n${question.prompt}\nLegal now: ${question.legal.join(", ")}.`,
+      [
+        request.question,
+        `${request.frame}, round ${request.round}, turn ${request.turn}${reasons.length === 0 ? "" : `; woken because ${reasons}`}.`,
+        `Legal now: ${[...legal, "inspect", "note"].join(", ")}.`,
+        `End this wake with one of: ${answering.join(", ") || "done"}.`,
+      ].join("\n"),
     ),
-    section("Offers and threads", parts.offers.length === 0 ? "None open." : parts.offers),
-    section("Your notes", parts.notes.length === 0 ? "(empty)" : parts.notes),
+    section(
+      "Offers and threads",
+      view.offers.length === 0 ? "None this session." : renderOffers(view.offers),
+    ),
+    section("Your notes", input.notes.length === 0 ? "(empty)" : input.notes),
   ].join("\n\n");
 };
 
 /** Sent when the model stops without answering; the conversation then continues. */
 export const NUDGE_MESSAGE =
-  "You have not answered yet. Finish with one of the answering tools that is legal now (for example done, bid, pass_bid, buy or decline).";
+  "You have not answered yet. End this wake with one of the answering tools that is legal now (see the Decision section).";

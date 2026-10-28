@@ -1,3 +1,5 @@
+import { DEFAULT_RULES } from "@mb/engine";
+
 import type { ToolArgs, ToolName } from "./tools.ts";
 
 /**
@@ -32,7 +34,7 @@ export interface WakeLimits {
 }
 
 export const DEFAULT_WAKE_LIMITS: WakeLimits = {
-  maxToolCallsPerWake: 24,
-  maxInvalidPerWake: 6,
-  wakeTimeoutMs: 180_000,
+  maxToolCallsPerWake: DEFAULT_RULES.maxToolCallsPerWake,
+  maxInvalidPerWake: DEFAULT_RULES.maxInvalidPerWake,
+  wakeTimeoutMs: DEFAULT_RULES.wakeTimeoutMs,
 };

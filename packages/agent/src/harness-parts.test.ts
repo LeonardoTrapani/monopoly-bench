@@ -1,171 +1,316 @@
+import {
+  apply,
+  Command,
+  command,
+  type CommandKind,
+  CommandKind as CommandKindSchema,
+  createConfig,
+  defaultRules,
+  digest,
+  type GameEvent,
+  type GameState,
+  GROUP_IDS,
+  newGame,
+  playerView,
+  PROPERTIES,
+  requestOf,
+  SEATS,
+} from "@mb/engine";
+import { allDone, answerFor, own, play, startGame, withPlayer } from "@mb/engine/testing";
+import { Result, Schema } from "effect";
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vite-plus/test";
 
-import { DEFAULT_WAKE_LIMITS } from "./executor.ts";
-import { openRouterModels, resolveOpenRouterModel, thinkingLevel } from "./models.ts";
-import { buildSystemPrompt, DEFAULT_PROMPT_SETTINGS } from "./prompt.ts";
-import { ANSWERING_TOOLS, TOOL_NAMES, toolDescriptions, toolParameters } from "./tools.ts";
+import {
+  commandFromTool,
+  isCommandTool,
+  resolveProperty,
+  TOOL_COMMANDS,
+  toolsForKinds,
+} from "./commands.ts";
+import { CLOSED_DECISION, engineExecutor, inspectText } from "./engine-tools.ts";
+import { buildSystemPrompt, wakeLimitsOf } from "./prompt.ts";
+import { TOOL_NAMES, toolDescriptions, toolParameters, type ToolArgs } from "./tools.ts";
 import { renderWakeMessage } from "./wake-message.ts";
 
-const settings = { ...DEFAULT_PROMPT_SETTINGS, playersCount: 4, limits: DEFAULT_WAKE_LIMITS };
+const isCommand = Schema.is(Command);
 
-describe("tools", () => {
+/** Field names of an engine command kind, without the ones the host adds. */
+const commandFields = (kind: CommandKind): ReadonlyArray<string> =>
+  Object.keys(Command.cases[kind].fields)
+    .filter((field) => field !== "_tag" && field !== "seat" && field !== "decisionId")
+    .sort();
+
+describe("tools against the engine", () => {
   it("exposes exactly the SPEC §6.3 tool set", () => {
-    expect([...TOOL_NAMES].sort()).toEqual(
+    expect([...TOOL_NAMES].sort()).toEqual(Object.keys(toolParameters).sort());
+    expect(Object.keys(toolDescriptions).sort()).toEqual(Object.keys(toolParameters).sort());
+    expect(TOOL_NAMES).toHaveLength(24);
+  });
+
+  it("maps every seat command of the engine to one tool with the same fields", () => {
+    const seatKinds = CommandKindSchema.literals.filter(
+      (kind) => kind !== "TimeoutSeat" && kind !== "AbortGame",
+    );
+
+    expect(Object.values(TOOL_COMMANDS).sort()).toEqual([...seatKinds].sort());
+
+    for (const tool of TOOL_NAMES.filter(isCommandTool)) {
+      const parameters = Object.keys(toolParameters[tool].properties).sort();
+
+      expect({ tool, fields: parameters }).toEqual({
+        tool,
+        fields: commandFields(TOOL_COMMANDS[tool]),
+      });
+    }
+  });
+
+  it("offers exactly the engine's group and seat literals", () => {
+    expect(toolParameters.follow.properties.group.enum).toEqual([...GROUP_IDS]);
+    expect(toolParameters.offer.properties.to.enum).toEqual([...SEATS]);
+  });
+
+  it("builds commands the engine schema accepts, from names, slugs and positions", () => {
+    const answer = { seat: "B" as const, decisionId: "7.1.B" };
+
+    const samples: ReadonlyArray<readonly [keyof typeof TOOL_COMMANDS, ToolArgs]> = [
+      ["follow", { group: "dark-blue" }],
+      ["unfollow", { group: "railroads" }],
+      ["build", { property: "Boardwalk" }],
+      ["sell_building", { property: 39 }],
+      ["mortgage", { property: "reading-railroad" }],
+      ["unmortgage", { property: "St. Charles Place" }],
       [
-        "inspect",
-        "note",
-        "follow",
-        "unfollow",
-        "build",
-        "sell_building",
-        "mortgage",
-        "unmortgage",
         "offer",
-        "accept",
-        "reject",
-        "withdraw",
-        "message",
-        "buy",
-        "decline",
-        "pay_jail_fine",
-        "use_jail_card",
-        "roll_for_doubles",
-        "bid",
-        "pass_bid",
-        "keep_mortgage",
-        "pay_off_mortgage",
-        "declare_bankruptcy",
-        "done",
-      ].sort(),
-    );
-    expect(Object.keys(toolParameters).sort()).toEqual([...TOOL_NAMES].sort());
-    expect(Object.keys(toolDescriptions).sort()).toEqual([...TOOL_NAMES].sort());
-  });
+        {
+          to: "A",
+          give: { cash: 100, properties: ["B&O Railroad", 1] },
+          get: { jailCards: 1 },
+          comment: "Deal?",
+          replyTo: 2,
+        },
+      ],
+      ["offer", { give: {}, get: { cash: 50 } }],
+      ["accept", { offerId: 3 }],
+      ["reject", { offerId: 3, comment: "No." }],
+      ["withdraw", { offerId: 4 }],
+      ["message", { offerId: 4, text: "Still open." }],
+      ["buy", {}],
+      ["decline", {}],
+      ["pay_jail_fine", {}],
+      ["use_jail_card", {}],
+      ["roll_for_doubles", {}],
+      ["bid", { amount: 120 }],
+      ["pass_bid", {}],
+      ["keep_mortgage", { property: "Illinois" }],
+      ["pay_off_mortgage", { property: "24" }],
+      ["declare_bankruptcy", {}],
+      ["done", {}],
+    ];
 
-  it("marks the answering tools", () => {
-    expect(ANSWERING_TOOLS.has("done")).toBe(true);
-    expect(ANSWERING_TOOLS.has("bid")).toBe(true);
-    expect(ANSWERING_TOOLS.has("offer")).toBe(false);
-    expect(ANSWERING_TOOLS.has("inspect")).toBe(false);
-  });
+    for (const [tool, args] of samples) {
+      expect(Value.Check(toolParameters[tool], args)).toBe(true);
 
-  it("validates offer and bid arguments", () => {
-    expect(
-      Value.Check(toolParameters.offer, {
-        to: "C",
-        give: { cash: 100, properties: ["Boardwalk"] },
-        get: { jailCards: 1 },
-        comment: "Fair deal",
+      // SAFETY: Value.Check just proved `args` matches the tool's parameter schema.
+      const built = commandFromTool(answer, tool, args as ToolArgs<typeof tool>);
+
+      expect(Result.isSuccess(built) && isCommand(built.success)).toBe(true);
+      expect(Result.isSuccess(built) && built.success._tag).toBe(TOOL_COMMANDS[tool]);
+    }
+
+    const offer = commandFromTool(answer, "offer", {
+      to: "A",
+      give: { cash: 100, properties: ["B&O Railroad", 1] },
+      get: { jailCards: 1 },
+    });
+
+    expect(Result.isSuccess(offer) && offer.success).toEqual(
+      command("Offer", {
+        seat: "B",
+        decisionId: "7.1.B",
+        to: "A",
+        give: { cash: 100, properties: ["b-and-o-railroad", "mediterranean-avenue"], jailCards: 0 },
+        get: { cash: 0, properties: [], jailCards: 1 },
       }),
-    ).toBe(true);
-    expect(Value.Check(toolParameters.offer, { to: "G", give: {}, get: {} })).toBe(false);
-    expect(Value.Check(toolParameters.offer, { give: { cash: -5 }, get: {} })).toBe(false);
-    expect(Value.Check(toolParameters.bid, { amount: 10 })).toBe(true);
-    expect(Value.Check(toolParameters.bid, { amount: 0 })).toBe(false);
-    expect(Value.Check(toolParameters.message, { offerId: "o1", text: "x".repeat(281) })).toBe(
-      false,
     );
+  });
+
+  it("resolves every deed by name, slug and position, and refuses unknown or ambiguous ones", () => {
+    for (const info of PROPERTIES) {
+      expect(resolveProperty(info.name)).toBe(info.id);
+      expect(resolveProperty(info.id)).toBe(info.id);
+      expect(resolveProperty(info.position)).toBe(info.id);
+      expect(resolveProperty(String(info.position))).toBe(info.id);
+    }
+
+    expect(resolveProperty("illinois")).toBe("illinois-avenue");
+    expect(resolveProperty("pennsylvania")).toBeNull();
+    expect(resolveProperty(0)).toBeNull();
+    expect(resolveProperty("Free Parking")).toBeNull();
+
+    const refused = commandFromTool({ seat: "A", decisionId: "x" }, "build", {
+      property: "Park Lane",
+    });
+
+    expect(Result.isFailure(refused) && refused.failure).toContain('Unknown deed "Park Lane"');
+  });
+
+  it("names tools for engine command kinds", () => {
+    expect(toolsForKinds(["Buy", "Decline", "Build", "TimeoutSeat"])).toEqual([
+      "buy",
+      "decline",
+      "build",
+    ]);
+  });
+});
+
+describe("engine executor", () => {
+  const host = (start: GameState) => {
+    let state = start;
+    let notes = "";
+
+    return {
+      get state() {
+        return state;
+      },
+      get notes() {
+        return notes;
+      },
+      seat: {
+        state: () => state,
+        submit: (next: Command) =>
+          Result.map(apply(state, next), (applied) => {
+            state = applied.state;
+
+            return applied.events;
+          }),
+        notes: () => notes,
+        saveNotes: (text: string) => {
+          notes = text;
+        },
+      },
+    };
+  };
+
+  it("applies commands at once, returns engine reasons, and ends on the answer", async () => {
+    const game = host(startGame(2));
+    const decisionId = requestOf(game.state, "A")?.decisionId ?? "";
+    const execute = engineExecutor(game.seat, "A", decisionId);
+
+    const build = await execute("build", { property: "Boardwalk" }, "c1");
+    expect(build.ok).toBe(false);
+    expect(build.terminal).toBe(false);
+    expect(build.message.length).toBeGreaterThan(0);
+    expect(build.message).not.toContain("Invalid arguments");
+
+    const unknown = await execute("mortgage", { property: "Park Lane" }, "c2");
+    expect(unknown.message).toContain("Unknown deed");
+
+    const note = await execute("note", { text: "Buy oranges." }, "c3");
+    expect(note.ok).toBe(true);
+    expect(game.notes).toBe("Buy oranges.");
+
+    const seen = await execute("inspect", { topic: "deed", subject: "boardwalk" }, "c4");
+    expect(seen.message).toContain("Boardwalk (39, boardwalk), Dark Blue: price $400");
+
+    const done = await execute("done", {}, "c5");
+    expect(done).toMatchObject({ ok: true, terminal: true });
+
+    const late = await execute("done", {}, "c6");
+    expect(late).toEqual({ ok: false, message: CLOSED_DECISION, terminal: true });
+  });
+
+  it("answers inspect topics from the player view", () => {
+    const state = own(startGame(2), "B", ["boardwalk", "park-place"]);
+    const view = playerView(state, "A");
+
+    expect(inspectText(view, { topic: "player", subject: "b" })).toContain(
+      "Park Place (37) B; Boardwalk (39) B",
+    );
+    expect(inspectText(view, { topic: "rules" })).toContain("Starting cash $1,500");
+    expect(inspectText(view, { topic: "offers" })).toBe("No offers this session.");
+    expect(inspectText(view, { topic: "deed", subject: "nowhere" })).toContain("Unknown deed");
   });
 });
 
 describe("system prompt", () => {
-  it("is a pure function of the game settings", () => {
-    expect(buildSystemPrompt(settings)).toBe(buildSystemPrompt({ ...settings }));
+  const rules = defaultRules();
+
+  it("is a pure function of the rules and the player count", () => {
+    expect(buildSystemPrompt(rules, 4)).toBe(buildSystemPrompt({ ...rules }, 4));
   });
 
-  it("states the objective, the variants, the round protocol and the trading rule", () => {
-    const prompt = buildSystemPrompt(settings);
+  it("states the game's actual settings, the variants and the trading rule", () => {
+    const prompt = buildSystemPrompt(
+      { ...rules, startingCash: 2000, maxRounds: 40, jailFine: 75 },
+      3,
+    );
 
-    expect(prompt).toContain("Finish first");
+    expect(prompt).toContain("There are 3 players");
+    expect(prompt).toContain("starts with $2,000");
+    expect(prompt).toContain("after 40 full rounds");
+    expect(prompt).toContain("pay $75 and roll");
     expect(prompt).toContain("Declared variants");
-    expect(prompt).toContain("Rent is collected automatically");
-    expect(prompt).toContain(`${settings.maxRounds} full rounds`);
-    expect(prompt).toContain("fixed order");
-    expect(prompt).toContain("no loans");
     expect(prompt).toContain("no rent immunity");
+    expect(prompt).toContain("Boardwalk (39)");
     expect(prompt).toContain("24 tool calls, 6 invalid calls, 180 seconds");
+    expect(wakeLimitsOf(rules)).toEqual({
+      maxToolCallsPerWake: 24,
+      maxInvalidPerWake: 6,
+      wakeTimeoutMs: 180_000,
+    });
   });
 });
 
 describe("wake message", () => {
-  it("renders the sections in SPEC §6.2 order", () => {
-    const message = renderWakeMessage({
-      seat: "B",
-      roster: [
-        { seat: "A", label: "Claude Opus 5.5" },
-        { seat: "B", label: "GPT-6.1 Sol" },
+  it("renders a reviewable wake message (snapshot)", async () => {
+    const config = createConfig({
+      gameId: "fixture",
+      seed: "fixture-seed",
+      seats: [
+        { seat: "A", label: "Claude Opus 5.5", competitorId: "anthropic/claude-opus-5.5" },
+        { seat: "B", label: "GPT-6.1 Sol", competitorId: "openai/gpt-6.1-sol" },
+        { seat: "C", label: "Bot (heuristic)", competitorId: "bot:heuristic" },
       ],
-      turn: 12,
-      digest: ["A rolled 3+4 and landed on Chance"],
-      view: "Cash: $1,320",
-      question: {
-        frame: "Table",
-        round: 2,
-        reasons: ["addressed"],
-        legal: ["accept", "reject", "done"],
-        prompt: "A offered you a trade.",
-      },
-      offers: "o7: A gives Boardwalk, gets $400",
-      notes: "",
     });
 
-    const order = [
-      "You are seat B",
-      "Since your last wake",
-      "## Table",
-      "## Decision",
-      "Offers and threads",
-      "Your notes",
-    ];
+    const started = newGame(config);
+    const events: Array<GameEvent> = [...started.events];
+    let state = own(started.state, "A", ["st-james-place", "tennessee-avenue"]);
 
-    const positions = order.map((needle) => message.indexOf(needle));
+    state = own(state, "B", ["new-york-avenue", "reading-railroad"]);
+    state = own(state, "B", ["boardwalk"], { mortgaged: true });
+    state = withPlayer(state, "C", { cash: 640, jailCards: ["chance"] });
 
-    expect(positions.every((position) => position >= 0)).toBe(true);
-    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
-    expect(message).toContain("A: Claude Opus 5.5");
-    expect(message).toContain("B (you)");
-    expect(message).toContain("Woken because: addressed.");
-    expect(message).toContain("(empty)");
-  });
-});
+    const offer = play(
+      state,
+      answerFor(state, "A", "Offer", {
+        to: "B",
+        give: { cash: 250, properties: [], jailCards: 0 },
+        get: { cash: 0, properties: ["new-york-avenue"], jailCards: 0 },
+        comment: "Completes my orange set; fair price.",
+      }),
+    );
 
-describe("OpenRouter models", () => {
-  const models = openRouterModels();
+    events.push(...offer.events);
 
-  it("uses the curated catalog entry when pi-ai knows the id", () => {
-    const model = resolveOpenRouterModel(models, "anthropic/claude-opus-5.5", undefined);
+    const closed = allDone(offer.state);
+    events.push(...closed.events);
+    state = closed.state;
 
-    expect(model.api).toBe("anthropic-messages");
-    expect(model.cost.input).toBeGreaterThan(0);
-  });
+    const request = requestOf(state, "B");
 
-  it("builds a priced OpenAI-compatible entry for ids missing from the catalog", () => {
-    const model = resolveOpenRouterModel(models, "example/brand-new-model", {
-      id: "example/brand-new-model",
-      context_length: 200_000,
-      pricing: { prompt: "0.000002", completion: "0.00001" },
+    if (request === null) throw new Error("B should be woken in round 2 (addressed)");
+
+    const message = renderWakeMessage({
+      view: playerView(state, "B"),
+      request,
+      digest: digest(events, 0, "B"),
+      notes: "A is collecting orange. Do not sell New York cheap.",
     });
 
-    expect(model.api).toBe("openai-completions");
-    expect(model.provider).toBe("openrouter");
-    expect(model.contextWindow).toBe(200_000);
-    expect(model.cost.input).toBeCloseTo(2);
-    expect(model.cost.output).toBeCloseTo(10);
-  });
-
-  it("lets a listing override catalog prices", () => {
-    const model = resolveOpenRouterModel(models, "anthropic/claude-opus-5.5", {
-      id: "anthropic/claude-opus-5.5",
-      pricing: { prompt: "0.000001", completion: "0.000003" },
-    });
-
-    expect(model.api).toBe("anthropic-messages");
-    expect(model.cost.input).toBeCloseTo(1);
-  });
-
-  it("maps the SPEC reasoning setting to pi thinking levels", () => {
-    expect(thinkingLevel(undefined)).toBe("off");
-    expect(thinkingLevel("high")).toBe("high");
+    expect(request.reasons).toContain("addressed");
+    expect(message).toContain("A → B, open");
+    await expect(message).toMatchFileSnapshot("__snapshots__/wake-message.txt");
   });
 });

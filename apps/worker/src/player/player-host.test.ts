@@ -1,4 +1,4 @@
-import { buildSystemPrompt, DEFAULT_PROMPT_SETTINGS, DEFAULT_WAKE_LIMITS } from "@mb/agent";
+import { buildSystemPrompt, DEFAULT_WAKE_LIMITS } from "@mb/agent";
 import {
   fauxAssistantMessage,
   type FauxResponseStep,
@@ -8,6 +8,7 @@ import {
   toolTurn,
 } from "@mb/agent/testing";
 import { LlmSeat, type SeatActivity } from "@mb/api";
+import { defaultRules } from "@mb/engine";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { SeatCall, WakeReport, WakeRequest } from "../contracts.ts";
@@ -26,11 +27,7 @@ const request = (decisionId: string, sessionKey: string, deadline: number): Wake
   reasons: ["round1"],
   spec: LlmSeat.make({ model: "example/model", label: "Example", reasoning: "low" }),
   listing: null,
-  systemPrompt: buildSystemPrompt({
-    ...DEFAULT_PROMPT_SETTINGS,
-    playersCount: 2,
-    limits: DEFAULT_WAKE_LIMITS,
-  }),
+  systemPrompt: buildSystemPrompt(defaultRules(), 2),
   message: `Wake ${decisionId}`,
   limits: DEFAULT_WAKE_LIMITS,
   deadline,

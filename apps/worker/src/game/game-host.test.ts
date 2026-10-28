@@ -1,5 +1,5 @@
-import { DEFAULT_WAKE_LIMITS } from "@mb/agent";
 import { BotSeat, LlmSeat, type SeatSpec, WakeTranscript } from "@mb/api";
+import { createConfig, GameConfig, GameEvent, replay, standings } from "@mb/engine";
 import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -13,18 +13,25 @@ import {
 import type { FinishedGame, WakeRow } from "../db/writes.ts";
 import { planSeats } from "../runs/expand.ts";
 import { memorySqlPort } from "../testing/sqlite.ts";
-import { archiveKeys, GameHost, MAX_STEPS_PER_SETTLE, WAKE_GRACE_MS } from "./game-host.ts";
-import { stubEngineBinding } from "./stub-engine.ts";
+import { engineBinding } from "./engine-binding.ts";
+import { archiveKeys, GameHost, WAKE_GRACE_MS } from "./game-host.ts";
 
 const decodeMessage = Schema.decodeUnknownSync(Schema.fromJsonString(SpectatorMessage));
 
+const decodeEvent = Schema.decodeUnknownSync(Schema.fromJsonString(GameEvent));
+
+const decodeConfig = Schema.decodeUnknownSync(Schema.fromJsonString(GameConfig));
+
 const llm = (label: string) => LlmSeat.make({ model: "example/model", label });
 
-const bot = () => BotSeat.make({ policy: "random" });
+const random = () => BotSeat.make({ policy: "random" });
+
+const heuristic = () => BotSeat.make({ policy: "heuristic" });
 
 interface Options {
   readonly maxRounds?: number;
   readonly exhaustAfterCharge?: boolean;
+  readonly stepsPerAlarm?: number;
 }
 
 const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
@@ -81,26 +88,34 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
       },
       now: () => clock.now,
       log: () => {},
+      stepsPerAlarm: options.stepsPerAlarm ?? 400,
     },
-    stubEngineBinding,
+    engineBinding,
   );
+
+  const seats = planSeats(specs);
 
   const start: GameStart = {
     gameId: "g1",
     runId: "r1",
     gameIndex: 0,
-    seed: "42",
-    playersCount: specs.length,
-    seats: planSeats(specs),
-    maxRounds: options.maxRounds ?? 1,
-    tableFrequency: "everyTurn",
-    limits: DEFAULT_WAKE_LIMITS,
+    config: createConfig({
+      gameId: "g1",
+      seed: "42",
+      seats: seats.map((seat) => ({
+        seat: seat.seat,
+        label: seat.label,
+        competitorId: seat.competitorId,
+      })),
+      rules: { maxRounds: options.maxRounds ?? 3 },
+    }),
+    seats,
     listings: [],
     budgetExhausted: false,
   };
 
   /** Run due alarms, as the runtime would. */
-  const drain = async (limit = 100): Promise<void> => {
+  const drain = async (limit = 200): Promise<void> => {
     for (let index = 0; index < limit; index += 1) {
       const due = alarm;
 
@@ -126,6 +141,15 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
     args,
   });
 
+  /** The latest wake that is still open (the game may have moved past older ones). */
+  const lastWake = (): WakeRequest => {
+    const wake = wakes.at(-1);
+
+    if (wake === undefined) throw new Error("no wake dispatched");
+
+    return wake;
+  };
+
   return {
     host,
     sql,
@@ -140,6 +164,7 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
     clock,
     drain,
     call,
+    lastWake,
     alarmsRun: () => alarmsRun,
   };
 };
@@ -164,9 +189,18 @@ const transcriptFor = (request: WakeRequest): WakeTranscript =>
     timedOut: false,
   });
 
-describe("GameHost", () => {
-  it("plays a bot-only game to the end, archives it and notifies the run", async () => {
-    const h = setup([bot(), bot(), bot()], { maxRounds: 3 });
+const report = (request: WakeRequest, endReason = "unanswered") => ({
+  gameId: request.gameId,
+  seat: request.seat,
+  decisionId: request.decisionId,
+  transcript: transcriptFor(request),
+  latencyMs: 5000,
+  endReason,
+});
+
+describe("GameHost with the real engine", () => {
+  it("plays a bot-only Monopoly game to the end, archives it and notifies the run", async () => {
+    const h = setup([heuristic(), random(), heuristic()], { maxRounds: 12 });
 
     await h.host.start(h.start);
     await h.drain();
@@ -174,79 +208,135 @@ describe("GameHost", () => {
     expect(h.host.status()).toBe("finished");
     expect(h.wakes).toHaveLength(0);
     expect(h.outcomes).toHaveLength(1);
+    expect(h.outcomes[0]?.status).toBe("finished");
+    expect(h.outcomes[0]?.results.map((result) => result.rank).sort()).toEqual([1, 2, 3]);
+    expect(h.finishes[0]?.endReason).toMatch(/turnCap|lastPlayerStanding/);
+    expect(h.finishes[0]?.seats.some((seat) => seat.propertiesBought > 0)).toBe(true);
 
-    const outcome = h.outcomes[0];
-    expect(outcome?.status).toBe("finished");
-    expect(outcome?.results.map((result) => result.rank).sort()).toEqual([1, 2, 3]);
-    expect(h.finishes[0]?.endReason).toBe("turnCap");
-    expect(h.finishes[0]?.winnerSeat).not.toBeNull();
+    const eventsFile = h.archive.get(archiveKeys.events("g1")) ?? "";
+    expect(eventsFile).toBe(h.host.eventsSince(0));
 
-    const events = h.archive.get(archiveKeys.events("g1")) ?? "";
-    expect(events).toBe(h.host.eventsSince(0));
-    expect(events.trim().split("\n").length).toBeGreaterThan(9);
+    // The archive is enough to rebuild the game: config.json + events.jsonl → replay.
+    const config = decodeConfig(h.archive.get(archiveKeys.config("g1")) ?? "");
+
+    const events = eventsFile
+      .trim()
+      .split("\n")
+      .map((line) => decodeEvent(line));
+
+    const replayed = replay(config, events);
+
+    expect(replayed.status).toBe("finished");
+    expect(standings(replayed).map((row) => row.seat)).toEqual(
+      [...(h.finishes[0]?.seats ?? [])]
+        .sort((a, b) => (a.rank ?? 9) - (b.rank ?? 9))
+        .map((seat) => seat.seat),
+    );
     expect(h.archive.has(archiveKeys.summary("g1"))).toBe(true);
     expect(h.archive.has(archiveKeys.seat("g1", "A"))).toBe(true);
 
     const last = decodeMessage(h.broadcasts.at(-1) ?? "");
     expect(SpectatorMessage.guards.Status(last)).toBe(true);
+    expect(JSON.parse(h.host.config() ?? "{}")).toMatchObject({ gameId: "g1", seed: "42" });
   });
 
-  it("yields to a fresh alarm every MAX_STEPS_PER_SETTLE bot moves", async () => {
-    const h = setup([bot(), bot()], { maxRounds: 200 });
+  it("yields to fresh alarms on long bot games and resumes from snapshot + events", async () => {
+    const h = setup([random(), random()], { maxRounds: 120, stepsPerAlarm: 25 });
 
     await h.host.start(h.start);
-    await h.drain(1000);
 
-    expect(h.host.status()).toBe("finished");
-    // 400 turns × 2 bot moves, at most MAX_STEPS_PER_SETTLE per alarm.
-    expect(h.alarmsRun()).toBeGreaterThanOrEqual(Math.ceil((400 * 2) / MAX_STEPS_PER_SETTLE));
+    const early = h.sql.exec("SELECT seq, json FROM snapshot WHERE id = 1")[0];
+
+    await h.drain(1);
+
+    expect(h.host.status()).toBe("running");
+    expect(h.alarmsRun()).toBe(1);
+
+    // Simulate a reset before the snapshot was flushed: an old snapshot plus newer events.
+    h.sql.exec("UPDATE snapshot SET seq = ?, json = ? WHERE id = 1", early?.["seq"] ?? 0, early?.["json"] ?? "");
+
+    // A new object over the same storage (as after an eviction) continues the same game.
+    const resumed = new GameHost(
+      {
+        sql: h.sql,
+        db: {
+          markRunning: async () => {},
+          progress: async () => {},
+          recordWake: async () => {},
+          finish: async () => {},
+        },
+        archive: { put: async () => {} },
+        players: { wake: async () => {} },
+        run: { charge: async () => ({ exhausted: false }), gameFinished: async () => {} },
+        broadcast: () => {},
+        setAlarm: async () => {},
+        now: () => h.clock.now,
+        log: () => {},
+      },
+      engineBinding,
+    );
+
+    expect(decodeMessage(resumed.helloMessage("g1"))).toEqual(decodeMessage(h.host.helloMessage("g1")));
+
+    for (let index = 0; index < 500 && resumed.status() === "running"; index += 1) {
+      await resumed.alarm();
+    }
+
+    expect(resumed.status()).toBe("finished");
   });
 
   it("is idempotent on start", async () => {
-    const h = setup([bot(), bot()]);
+    const h = setup([random(), random()]);
 
     await h.host.start(h.start);
-    await h.host.start({ ...h.start, seed: "other" });
+    await h.host.start(h.start);
 
     expect(
       h.host
         .eventsSince(0)
         .split("\n")
-        .filter((line) => line.includes("GameStarted")),
+        .filter((line) => line.includes('"GameStarted"')),
     ).toHaveLength(1);
   });
 
   it("wakes LLM seats with the system prompt and wake message, and applies their answers once", async () => {
-    const h = setup([llm("Opus"), bot()]);
+    const h = setup([llm("Opus"), random()]);
 
     await h.host.start(h.start);
     await h.drain();
 
-    expect(h.wakes).toHaveLength(1);
-
-    const wake = h.wakes[0];
-
-    if (wake === undefined) throw new Error("no wake");
+    const wake = h.lastWake();
 
     expect(wake.seat).toBe("A");
-    expect(wake.decisionId).toBe("1.1.A");
-    expect(wake.message).toContain("You are seat A");
-    expect(wake.message).toContain("B: Bot (random)");
+    expect(wake.frame).toBe("Table");
+    expect(wake.message).toContain("You are seat A (Opus)");
+    expect(wake.message).toContain("## Decision");
     expect(wake.systemPrompt).toContain("Declared variants");
-    expect(wake.deadline).toBe(h.clock.now + DEFAULT_WAKE_LIMITS.wakeTimeoutMs + WAKE_GRACE_MS);
+    expect(wake.systemPrompt).toContain("after 3 full rounds");
+    expect(wake.deadline).toBe(h.clock.now + 180_000 + WAKE_GRACE_MS);
 
-    const seen = await h.host.inspect(h.call(wake, "c1", "inspect", { topic: "table" }));
-    expect(seen.ok).toBe(true);
-    expect(seen.terminal).toBe(false);
+    const seen = await h.host.inspect(
+      h.call(wake, "c1", "inspect", { topic: "deed", subject: 39 }),
+    );
+
+    expect(seen).toMatchObject({ ok: true, terminal: false });
+    expect(seen.message).toContain("Boardwalk (39, boardwalk)");
 
     const noted = await h.host.submit(h.call(wake, "c2", "note", { text: "Roll high." }));
     expect(noted).toEqual({ ok: true, message: "Notes saved (10 characters).", terminal: false });
 
-    const illegal = await h.host.submit(h.call(wake, "c3", "buy"));
+    const illegal = await h.host.submit(h.call(wake, "c3", "build", { property: "boardwalk" }));
     expect(illegal.ok).toBe(false);
     expect(illegal.terminal).toBe(false);
+    expect(illegal.message).not.toContain("Invalid arguments");
 
-    const malformed = await h.host.submit(h.call(wake, "c4", "bid", { amount: "lots" }));
+    const unknownDeed = await h.host.submit(
+      h.call(wake, "c4", "mortgage", { property: "Park Lane" }),
+    );
+
+    expect(unknownDeed.message).toContain("Unknown deed");
+
+    const malformed = await h.host.submit(h.call(wake, "c5", "bid", { amount: "lots" }));
     expect(malformed).toEqual({
       ok: false,
       message: "Invalid arguments for bid.",
@@ -254,117 +344,90 @@ describe("GameHost", () => {
     });
 
     const eventsBefore = h.host.eventsSince(0);
-    const answered = await h.host.done(h.call(wake, "c5", "done"));
-    expect(answered.ok).toBe(true);
-    expect(answered.terminal).toBe(true);
+    const answered = await h.host.done(h.call(wake, "c6", "done"));
+    expect(answered).toMatchObject({ ok: true, terminal: true });
 
     const eventsAfter = h.host.eventsSince(0);
     expect(eventsAfter.length).toBeGreaterThan(eventsBefore.length);
 
     // Same idempotency key: the stored answer, nothing applied twice.
-    expect(await h.host.done(h.call(wake, "c5", "done"))).toEqual(answered);
+    expect(await h.host.done(h.call(wake, "c6", "done"))).toEqual(answered);
     expect(h.host.eventsSince(0)).toBe(eventsAfter);
 
     // Another call on the answered decision: refused and terminal.
-    const late = await h.host.done(h.call(wake, "c6", "done"));
-    expect(late.ok).toBe(false);
-    expect(late.terminal).toBe(true);
+    const late = await h.host.done(h.call(wake, "c7", "done"));
+    expect(late).toMatchObject({ ok: false, terminal: true });
 
     await h.drain();
 
-    expect(h.wakes).toHaveLength(2);
-    expect(h.wakes[1]?.decisionId).toBe("2.1.A");
-    expect(h.wakes[1]?.message).toContain("Roll high.");
-    expect(h.wakes[1]?.message).toContain("rolled");
-
-    const second = h.wakes[1];
-
-    if (second === undefined) throw new Error("no second wake");
-
-    await h.host.done(h.call(second, "c7", "done"));
-    await h.drain();
-
-    expect(h.host.status()).toBe("finished");
-    expect(h.outcomes[0]?.results.every((result) => result.rank !== null)).toBe(true);
+    const next = h.lastWake();
+    expect(next.decisionId).not.toBe(wake.decisionId);
+    expect(next.message).toContain("Roll high.");
   });
 
-  it("applies the default action at the deadline", async () => {
-    const h = setup([llm("Opus"), bot()]);
+  it("applies the default at the deadline and records a timed-out wake with no report", async () => {
+    const h = setup([llm("Opus"), random()]);
 
     await h.host.start(h.start);
     await h.drain();
 
-    const wake = h.wakes[0];
-
-    if (wake === undefined) throw new Error("no wake");
+    const wake = h.lastWake();
+    const before = h.wakes.length;
 
     h.clock.now = wake.deadline + 1;
     await h.drain();
 
-    expect(h.host.eventsSince(0)).toContain('"timedOut":true');
-    expect(h.wakes[1]?.decisionId).toBe("2.1.A");
+    expect(h.host.eventsSince(0)).toContain('"SeatTimedOut"');
+    expect(h.wakeRows).toHaveLength(1);
+    expect(h.wakeRows[0]).toMatchObject({
+      decisionId: wake.decisionId,
+      timedOut: true,
+      endReason: "noReport",
+      costUsd: 0,
+      competitorId: "example/model",
+    });
+    expect(h.wakes.length).toBeGreaterThan(before);
+
+    // The late report replaces the row with its real usage and stays a timeout.
+    await h.host.wakeFinished(report(wake));
+    expect(h.wakeRows.at(-1)).toMatchObject({
+      decisionId: wake.decisionId,
+      timedOut: true,
+      costUsd: 0.25,
+    });
 
     const stale = await h.host.done(h.call(wake, "late", "done"));
     expect(stale).toMatchObject({ ok: false, terminal: true });
   });
 
   it("records a finished wake once, charges the run and defaults an unanswered decision", async () => {
-    const h = setup([llm("Opus"), bot()]);
+    const h = setup([llm("Opus"), random()]);
 
     await h.host.start(h.start);
     await h.drain();
 
-    const wake = h.wakes[0];
+    const wake = h.lastWake();
 
-    if (wake === undefined) throw new Error("no wake");
-
-    const report = {
-      gameId: wake.gameId,
-      seat: wake.seat,
-      decisionId: wake.decisionId,
-      transcript: transcriptFor(wake),
-      latencyMs: 5000,
-      endReason: "unanswered",
-    };
-
-    await h.host.wakeFinished(report);
-    await h.host.wakeFinished(report);
+    await h.host.wakeFinished(report(wake));
+    await h.host.wakeFinished(report(wake));
     await h.drain();
 
     expect(h.wakeRows).toHaveLength(1);
+    expect(h.wakeRows[0]).toMatchObject({ seat: "A", costUsd: 0.25, timedOut: false });
+    expect(h.charges).toEqual([`g1:A:${wake.decisionId}`]);
+    expect(h.host.eventsSince(0)).toContain('"SeatTimedOut"');
     expect(h.host.transcripts("A").trim().split("\n")).toHaveLength(1);
-    expect(h.host.transcripts(null)).toContain('"decisionId":"1.1.A"');
     expect(h.host.transcripts("B")).toBe("");
-    expect(h.wakeRows[0]).toMatchObject({
-      seat: "A",
-      costUsd: 0.25,
-      competitorId: "example/model",
-    });
-    expect(h.charges).toEqual(["g1:A:1.1.A"]);
-    expect(h.host.eventsSince(0)).toContain('"timedOut":true');
-    expect(h.wakes[1]?.decisionId).toBe("2.1.A");
-
-    const second = h.wakes[1];
-
-    if (second === undefined) throw new Error("no second wake");
-
-    await h.host.done(h.call(second, "x", "done"));
-    await h.drain();
-
-    const seats = h.archive.get(archiveKeys.seat("g1", "A")) ?? "";
-    expect(seats.trim().split("\n")).toHaveLength(1);
-    expect(seats).toContain('"decisionId":"1.1.A"');
+    expect(h.lastWake().decisionId).not.toBe(wake.decisionId);
   });
 
   it("finishes a wake report that a crash cut off half-way", async () => {
-    const h = setup([llm("Opus"), bot()]);
+    const h = setup([llm("Opus"), random()]);
 
     await h.host.start(h.start);
     await h.drain();
 
-    const wake = h.wakes[0];
-
-    if (wake === undefined) throw new Error("no wake");
+    const wake = h.lastWake();
 
     // A previous attempt stored the transcript, then the object was reset.
     h.sql.exec(
@@ -374,42 +437,27 @@ describe("GameHost", () => {
       1,
       "{}",
     );
-    await h.host.wakeFinished({
-      gameId: wake.gameId,
-      seat: wake.seat,
-      decisionId: wake.decisionId,
-      transcript: transcriptFor(wake),
-      latencyMs: 10,
-      endReason: "unanswered",
-    });
+    await h.host.wakeFinished(report(wake));
     await h.drain();
 
     expect(h.wakeRows).toHaveLength(1);
-    expect(h.charges).toEqual(["g1:A:1.1.A"]);
-    expect(h.wakes[1]?.decisionId).toBe("2.1.A");
+    expect(h.charges).toEqual([`g1:A:${wake.decisionId}`]);
+    expect(h.lastWake().decisionId).not.toBe(wake.decisionId);
   });
 
   it("aborts the game instead of waking once the budget is exhausted", async () => {
-    const h = setup([llm("Opus"), bot()], { exhaustAfterCharge: true });
+    const h = setup([llm("Opus"), random()], { exhaustAfterCharge: true });
 
     await h.host.start(h.start);
     await h.drain();
 
-    const wake = h.wakes[0];
+    const wake = h.lastWake();
+    const before = h.wakes.length;
 
-    if (wake === undefined) throw new Error("no wake");
-
-    await h.host.wakeFinished({
-      gameId: wake.gameId,
-      seat: wake.seat,
-      decisionId: wake.decisionId,
-      transcript: transcriptFor(wake),
-      latencyMs: 10,
-      endReason: "answered",
-    });
+    await h.host.wakeFinished(report(wake, "answered"));
     await h.drain();
 
-    expect(h.wakes).toHaveLength(1);
+    expect(h.wakes).toHaveLength(before);
     expect(h.host.status()).toBe("aborted");
     expect(h.outcomes[0]?.status).toBe("aborted");
     expect(h.outcomes[0]?.results.every((result) => result.rank === null)).toBe(true);
@@ -422,6 +470,7 @@ describe("GameHost", () => {
     await h.drain();
 
     const hello = decodeMessage(h.host.helloMessage("g1"));
+
     expect(
       SpectatorMessage.guards.Hello(hello) && hello.lastSeq > 0 && hello.status === "running",
     ).toBe(true);

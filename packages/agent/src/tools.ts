@@ -3,47 +3,47 @@
  * parameter schemas, always all of them. Illegal calls come back as tool errors with the
  * engine's reason and count as invalid actions.
  *
- * Parameter schemas are hand-written TypeBox mirrors of the engine commands (SPEC §4.4) in
- * phase 1; phase 2 checks them against the engine's Effect schemas (see apps/worker/README.md).
+ * The parameters mirror the engine's commands (`@mb/engine` `Command`, without `seat` and
+ * `decisionId`, which the host adds); `commands.ts` maps them and `tools.test.ts` checks the
+ * two stay aligned. Deeds may be named by printed name, slug or board position.
  */
+import { GROUP_IDS, groupMembers, PROPERTIES, SEATS } from "@mb/engine";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
-export const SEATS = ["A", "B", "C", "D", "E", "F"] as const;
-
-/** Color groups plus railroads and utilities, the unit of `follow` (SPEC §5.3). */
-export const PROPERTY_GROUPS = [
-  "brown",
-  "lightBlue",
-  "pink",
-  "orange",
-  "red",
-  "yellow",
-  "green",
-  "darkBlue",
-  "railroad",
-  "utility",
-] as const;
+export { GROUP_IDS, SEATS };
 
 export const INSPECT_TOPICS = ["table", "deed", "player", "offers", "rules"] as const;
 
-const GroupParam = Type.Enum(PROPERTY_GROUPS, {
-  description: "Color group, or railroad / utility.",
+/** "Mediterranean Avenue (1), Baltic Avenue (3), …": every deed with its board position. */
+export const DEED_LIST = PROPERTIES.map((info) => `${info.name} (${info.position})`).join(", ");
+
+const GROUP_LIST = GROUP_IDS.map(
+  (group) =>
+    `${group}: ${groupMembers(group)
+      .map((id) => PROPERTIES.find((info) => info.id === id)?.name ?? id)
+      .join(", ")}`,
+).join("; ");
+
+const PropertyParam = Type.Union(
+  [Type.String({ minLength: 1 }), Type.Integer({ minimum: 0, maximum: 39 })],
+  {
+    description: `A deed, by printed name, slug (e.g. "boardwalk") or board position. Deeds: ${DEED_LIST}.`,
+  },
+);
+
+const GroupParam = Type.Enum(GROUP_IDS, {
+  description: `A color group, or railroads / utilities. ${GROUP_LIST}.`,
 });
 
-const PropertyParam = Type.String({
-  minLength: 1,
-  description: 'Deed name as printed, e.g. "Boardwalk", "Reading Railroad", "Electric Company".',
-});
-
-const OfferIdParam = Type.String({ minLength: 1, description: "Id of an open offer." });
+const OfferIdParam = Type.Integer({ minimum: 0, description: "Id of an offer (e.g. 3 for #3)." });
 
 const CommentParam = Type.String({
   maxLength: 280,
   description: "Public, non-binding text attached to the offer (at most 280 characters).",
 });
 
-const BundleParam = Type.Object(
+const AssetsParam = Type.Object(
   {
     cash: Type.Optional(Type.Integer({ minimum: 0, description: "Dollars." })),
     properties: Type.Optional(Type.Array(PropertyParam, { description: "Deeds." })),
@@ -60,16 +60,19 @@ export const toolParameters = {
   inspect: Type.Object({
     topic: Type.Enum(INSPECT_TOPICS, {
       description:
-        "table: the whole board and every player; deed: one title deed; player: one player's holdings; offers: open offers and threads; rules: the house settings of this game.",
+        "table: the board and every player; deed: one title deed; player: one player's holdings; offers: the offers and threads of this session; rules: this game's settings.",
     }),
     subject: Type.Optional(
-      Type.String({ description: "Deed name for topic=deed, seat letter for topic=player." }),
+      Type.Union([Type.String(), Type.Integer({ minimum: 0, maximum: 39 })], {
+        description:
+          "The deed (name, slug or position) for topic=deed, the seat letter for topic=player.",
+      }),
     ),
   }),
   note: Type.Object({
     text: Type.String({
       maxLength: 2000,
-      description: "Your complete private notes (at most 2000 characters). Replaces earlier notes.",
+      description: "Your complete private notes. Replaces earlier notes.",
     }),
   }),
   follow: Type.Object({ group: GroupParam }),
@@ -84,11 +87,11 @@ export const toolParameters = {
         description: "Seat the offer is addressed to. Omit for an open offer anyone may accept.",
       }),
     ),
-    give: BundleParam,
-    get: BundleParam,
+    give: AssetsParam,
+    get: AssetsParam,
     comment: Type.Optional(CommentParam),
     replyTo: Type.Optional(
-      Type.String({ minLength: 1, description: "Offer id this counter-offer answers." }),
+      Type.Integer({ minimum: 0, description: "Id of the offer this counter-offer answers." }),
     ),
   }),
   accept: Type.Object({ offerId: OfferIdParam }),
@@ -109,8 +112,8 @@ export const toolParameters = {
   roll_for_doubles: NoParams,
   bid: Type.Object({
     amount: Type.Integer({
-      minimum: 1,
-      description: "Total bid in dollars: at least $10 to open, at least $1 above the high bid.",
+      minimum: 0,
+      description: "Total bid in dollars (the question says the minimum).",
     }),
   }),
   pass_bid: NoParams,
@@ -174,41 +177,41 @@ export const ANSWERING_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
 
 export const toolDescriptions: Readonly<Record<ToolName, string>> = {
   inspect:
-    "Look something up without acting: the whole table, one title deed, one player's holdings, the open offers and threads, or this game's house settings. Does not end your wake.",
-  note: "Replace your private notes. Notes are the only thing you remember from one decision to the next; keep plans, reads on opponents and promises there. Does not end your wake.",
+    "Look something up without acting: the table, one title deed, one player's holdings, the session's offers and threads, or this game's settings. Does not end your wake.",
+  note: "Replace your private notes. Notes are the only thing you remember from one decision to the next: keep plans, reads on opponents and promises there. Does not end your wake.",
   follow:
-    "Ask to be woken when a new offer involves a property of this group. You already follow every group where you own a deed. Does not end your wake.",
+    "Be woken when a new offer involves a deed of this group. You already follow every group where you own a deed. Does not end your wake.",
   unfollow: "Stop being woken for new offers involving this group. Does not end your wake.",
   build:
-    "Draft one house on a street (or a hotel on a street with 4 houses). Needs the complete color set, no mortgaged street in it, even building, and bank supply. Applied when the round closes, in fixed order.",
+    "Draft one house on a street (or the hotel on a street with 4 houses). Needs the complete color set, no mortgaged street in it, even building and bank supply. Applied when the round closes, in fixed order (at once in a buy decision).",
   sell_building:
-    "Sell one building level on a street back to the bank for half its price, keeping the set even. Applied when the round closes (immediately while raising funds).",
+    "Sell one building level of a street back to the bank at half price, keeping the set even. Applied when the round closes (at once while raising funds).",
   mortgage:
-    "Mortgage an unimproved deed for its mortgage value. The whole color set must have no buildings.",
-  unmortgage: "Pay the mortgage value plus 10% to lift a mortgage.",
+    "Mortgage an unimproved deed for its mortgage value; its color set must have no buildings.",
+  unmortgage: "Lift a mortgage: pay the mortgage value plus 10%.",
   offer:
-    "Propose a two-party trade of cash, deeds (no buildings in their color set) and Get Out of Jail Free cards. Address it to a seat or leave it open for anyone. Can be accepted from the next round; only the terms are enforced. No loans, no future payments, no rent immunity.",
+    "Propose a two-party trade of cash, deeds (no buildings in their color set) and Get Out of Jail Free cards, to one seat or open to anyone. It can be accepted from the next round; only its terms are enforced. No loans, no future payments, no rent immunity.",
   accept:
-    "Accept an open offer addressed to you or open to all. Executed when the round closes, re-validated in fixed order; it may be dropped if the assets changed.",
+    "Accept an offer addressed to you or open to all, posted in an earlier round. Executed when the round closes, re-validated in fixed order; it may be dropped if the assets changed.",
   reject: "Reject an offer addressed to you, optionally with a public comment.",
   withdraw: "Withdraw one of your own open offers.",
-  message: "Add a public comment to an offer's thread without changing any terms.",
-  buy: "Buy the property you landed on at its list price. Answers the question and ends your wake.",
+  message: "Add a public comment to an offer's thread without changing its terms.",
+  buy: "Buy the deed you landed on at its list price. Answers the question and ends your wake.",
   decline:
-    "Do not buy the property you landed on; it goes to auction. Answers the question and ends your wake.",
-  pay_jail_fine: "Pay the $50 fine, then roll and move. Answers the question and ends your wake.",
+    "Do not buy the deed you landed on; it is auctioned. Answers the question and ends your wake.",
+  pay_jail_fine: "Pay the jail fine, then roll and move. Answers the question and ends your wake.",
   use_jail_card:
     "Use a Get Out of Jail Free card, then roll and move. Answers the question and ends your wake.",
   roll_for_doubles:
-    "Try to roll doubles to leave jail. On the third failed attempt you pay $50 and move. Answers the question and ends your wake.",
+    "Roll for doubles to leave jail; after the third failure you pay the fine and move. Answers the question and ends your wake.",
   bid: "Bid in the current auction. Bids are sealed per round; the highest bid of the round leads. Answers this auction round and ends your wake.",
-  pass_bid: "Drop out of the current auction. Answers this auction round and ends your wake.",
+  pass_bid: "Leave the current auction. Answers this auction round and ends your wake.",
   keep_mortgage:
-    "Keep a mortgaged deed you received mortgaged, paying 10% of its mortgage value now. Ends your wake when no mortgaged deed is left to decide.",
+    "Keep a deed you received mortgaged, paying 10% of its mortgage value now. Ends your wake when no mortgaged deed is left to decide.",
   pay_off_mortgage:
-    "Lift the mortgage of a deed you received, paying its mortgage value plus 10%. Ends your wake when no mortgaged deed is left to decide.",
+    "Lift the mortgage of a deed you received: pay its mortgage value plus 10%. Ends your wake when no mortgaged deed is left to decide.",
   declare_bankruptcy:
-    "Give up: you cannot pay your debt. Your assets go to your creditor. Answers the question and ends your wake.",
+    "Give up: you cannot pay your debt; your assets go to your creditor. Answers the question and ends your wake.",
   done: "Finish your part of this round: your drafts are submitted and you wait for the others. Answers the question and ends your wake.",
 };
 

@@ -100,6 +100,8 @@ const setup = () => {
       archivedEvents: async (gameId) => archive.get(gameId) ?? null,
       liveTranscripts: async () => "",
       archivedTranscripts: async (gameId, seat) => `{"gameId":"${gameId}","seat":"${seat}"}\n`,
+      liveConfig: async () => null,
+      archivedConfig: async (gameId) => `{"gameId":"${gameId}"}`,
       spectate: async () => new Response(null, { status: 204 }),
     },
     listings: async () => [],
@@ -458,6 +460,12 @@ describe("HTTP API", () => {
       (await (await h.call("GET", `/api/games/${gameId}/transcripts`)).text()).split("\n"),
     ).toHaveLength(3);
     expect((await h.call("GET", `/api/games/${gameId}/transcripts?seat=Z`)).status).toBe(400);
+
+    const config = await h.call("GET", `/api/games/${gameId}/config`);
+
+    expect(config.headers.get("content-type")).toContain("application/json");
+    expect(await config.text()).toBe(`{"gameId":"${gameId}"}`);
+    expect((await h.call("GET", "/api/games/nope/config")).status).toBe(404);
   });
 
   it("cancels a run with the API key", async () => {

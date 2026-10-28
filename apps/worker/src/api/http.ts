@@ -41,4 +41,11 @@ export const ndjson = (body: string): Response =>
     headers: { "content-type": "application/x-ndjson; charset=utf-8", ...CORS_HEADERS },
   });
 
+/** A JSON body produced elsewhere with its own schema (e.g. the engine's `GameConfig`). */
+export const jsonText = (body: string): Response =>
+  new Response(body, {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8", ...CORS_HEADERS },
+  });
+
 export const preflight = (): Response => new Response(null, { status: 204, headers: CORS_HEADERS });

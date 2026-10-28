@@ -35,7 +35,7 @@ import {
   models,
 } from "../db/queries.ts";
 import { isAuthorized } from "./auth.ts";
-import { errorJson, json, ndjson, preflight } from "./http.ts";
+import { errorJson, json, jsonText, ndjson, preflight } from "./http.ts";
 
 export interface RunsGateway {
   readonly create: (
@@ -55,6 +55,10 @@ export interface GamesGateway {
   readonly liveTranscripts: (gameId: string, seat: Seat | null) => Promise<string>;
   /** `games/<id>/seats/<seat>.jsonl` from R2, or null when not archived. */
   readonly archivedTranscripts: (gameId: string, seat: Seat) => Promise<string | null>;
+  /** The engine `GameConfig` JSON from the game's Durable Object, or null before it starts. */
+  readonly liveConfig: (gameId: string) => Promise<string | null>;
+  /** `games/<id>/config.json` from R2, or null when not archived. */
+  readonly archivedConfig: (gameId: string) => Promise<string | null>;
   /** Forward a WebSocket upgrade to the game's Durable Object. */
   readonly spectate: (gameId: string, request: Request) => Promise<Response>;
 }
@@ -212,6 +216,19 @@ const gameTranscripts = Effect.fn("gameTranscripts")(function* (
   return ndjson(files.join(""));
 });
 
+/** The engine `GameConfig` (for `replay(config, events)`): live from GameDO, finished from R2. */
+const gameConfig = Effect.fn("gameConfig")(function* (deps: ApiDeps, gameId: string) {
+  const game = yield* getGame(gameId);
+
+  if (game === null) return errorJson(404, "Game not found");
+
+  const finished = game.status !== "running" && game.status !== "queued";
+  const archived = finished ? yield* promise(() => deps.games.archivedConfig(gameId)) : null;
+  const config = archived ?? (yield* promise(() => deps.games.liveConfig(gameId)));
+
+  return config === null ? errorJson(404, "Game has not started") : jsonText(config);
+});
+
 const SeqOnly = Schema.fromJsonString(Schema.Struct({ seq: Schema.Number }));
 
 const decodeSeq = Schema.decodeUnknownOption(SeqOnly);
@@ -318,6 +335,8 @@ const route = (
     if (parts.length === 3 && id !== undefined && action === "transcripts") {
       return gameTranscripts(deps, id, url);
     }
+
+    if (parts.length === 3 && id !== undefined && action === "config") return gameConfig(deps, id);
 
     if (parts.length === 3 && id !== undefined && action === "ws") {
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {

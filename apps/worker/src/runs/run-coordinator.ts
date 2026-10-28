@@ -3,7 +3,6 @@
  * starts the next one when a game finishes, keeps the budget (charges are idempotent per
  * wake), updates ratings when a game finishes, and cancels.
  */
-import { DEFAULT_WAKE_LIMITS } from "@mb/agent";
 import { RunConfig, type RunStatus, type RunSummary } from "@mb/api";
 import { Match, Schema } from "effect";
 
@@ -18,7 +17,7 @@ import type { GameRatingInput } from "../db/ratings-store.ts";
 import type { NewRun } from "../db/writes.ts";
 import { jsonColumn, queryFirst, queryRows, type SqlPort } from "../sql.ts";
 import { charge, isExhausted, mayRun } from "./budget.ts";
-import { DEFAULT_CONCURRENCY, DEFAULT_MAX_ROUNDS, expandRun, type PlannedGame } from "./expand.ts";
+import { DEFAULT_CONCURRENCY, expandRun, gameConfigOf, type PlannedGame } from "./expand.ts";
 
 /** Re-pump interval while a run is active, in case a notification was lost. */
 export const WATCHDOG_MS = 10 * 60_000;
@@ -370,12 +369,8 @@ export class RunCoordinator {
       gameId: game.gameId,
       runId: run.run_id,
       gameIndex: game.gameIndex,
-      seed: game.seed,
-      playersCount: config.players.length,
+      config: gameConfigOf(game, config),
       seats: game.seats,
-      maxRounds: config.maxRounds ?? DEFAULT_MAX_ROUNDS,
-      tableFrequency: config.tableFrequency ?? "everyTurn",
-      limits: DEFAULT_WAKE_LIMITS,
       listings: listings.filter((listing) => models.has(listing.id)),
       budgetExhausted: false,
     };

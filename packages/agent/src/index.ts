@@ -4,6 +4,24 @@ export type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 export type { Api, Model } from "@earendil-works/pi-ai";
 
 export {
+  commandFromTool,
+  type CommandTool,
+  isCommandTool,
+  resolveProperty,
+  TOOL_COMMANDS,
+  toolsForKinds,
+} from "./commands.ts";
+
+export {
+  CLOSED_DECISION,
+  engineExecutor,
+  type EngineSeatHost,
+  illegalText,
+  inspectText,
+  outcomeText,
+} from "./engine-tools.ts";
+
+export {
   DEFAULT_WAKE_LIMITS,
   type ToolExecutor,
   type ToolOutcome,
@@ -20,9 +38,19 @@ export {
   thinkingLevel,
 } from "./models.ts";
 
-export { buildSystemPrompt, DEFAULT_PROMPT_SETTINGS, type PromptSettings } from "./prompt.ts";
+export { buildSystemPrompt, wakeLimitsOf } from "./prompt.ts";
 
-export { decodeSession, encodeSession } from "./session.ts";
+export {
+  deedIndex,
+  money,
+  renderDeed,
+  renderDeeds,
+  renderFrame,
+  renderHoldings,
+  renderOffers,
+  renderPlayerView,
+  renderRules,
+} from "./render.ts";
 
 export {
   runWake,
@@ -32,11 +60,14 @@ export {
   type WakeResult,
 } from "./run-wake.ts";
 
+export { decodeSession, encodeSession } from "./session.ts";
+
 export {
   ANSWERING_TOOLS,
+  DEED_LIST,
+  GROUP_IDS,
   INSPECT_TOPICS,
   isToolArgs,
-  PROPERTY_GROUPS,
   SEATS,
   TOOL_NAMES,
   type ToolArgs,
@@ -47,9 +78,8 @@ export {
 } from "./tools.ts";
 
 export {
+  MAX_DIGEST_LINES,
   NUDGE_MESSAGE,
   renderWakeMessage,
-  type RosterEntry,
-  type WakeMessageParts,
-  type WakeQuestion,
+  type WakeMessageInput,
 } from "./wake-message.ts";

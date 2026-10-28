@@ -12,6 +12,7 @@
     "@effect/sql-d1": "4.0.0",
     "@mb/agent": "workspace:*",
     "@mb/api": "workspace:*",
+    "@mb/bots": "workspace:*",
     "@mb/engine": "workspace:*",
     "effect": "4.0.0",
     "openskill": "5.0.1"

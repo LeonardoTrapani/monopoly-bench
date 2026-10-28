@@ -55,7 +55,7 @@ const setup = () => {
   const finish = (start: GameStart, status: GameOutcome["status"] = "finished"): GameOutcome => ({
     gameId: start.gameId,
     status,
-    playersCount: start.playersCount,
+    playersCount: start.seats.length,
     finishedAt: "2026-10-28T11:00:00.000Z",
     results: start.seats.map((seat, index) => ({
       seat: seat.seat,
@@ -104,10 +104,13 @@ describe("RunCoordinator", () => {
     expect(summary).toMatchObject({ id: "r1", status: "running", gamesTotal: 6, gamesRunning: 2 });
     expect(h.started.map((start) => start.gameId)).toEqual(["r1-0-0", "r1-0-1"]);
     expect(h.started[0]).toMatchObject({
-      maxRounds: 7,
-      tableFrequency: "everyRound",
+      config: { gameId: "r1-0-0", rules: { maxRounds: 7, tableFrequency: "everyRound" } },
       budgetExhausted: false,
     });
+    expect(h.started[1]?.config.seats.map((seat) => seat.competitorId)).toEqual([
+      "bot:random",
+      "anthropic/claude-opus-5.5",
+    ]);
     expect(h.started[0]?.listings.map((listing) => listing.id)).toEqual([
       "anthropic/claude-opus-5.5",
     ]);

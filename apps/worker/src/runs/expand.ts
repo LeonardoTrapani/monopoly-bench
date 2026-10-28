@@ -5,6 +5,7 @@
  * seed: the same dice and decks, with the competitors moved one seat along.
  */
 import { competitorId, competitorLabel, type RunConfig, type Seat, type SeatSpec } from "@mb/api";
+import { createConfig, type GameConfig, type RulesConfig } from "@mb/engine";
 import { Match } from "effect";
 
 import type { PlannedSeat } from "../contracts.ts";
@@ -12,8 +13,6 @@ import type { PlannedSeat } from "../contracts.ts";
 export const SEAT_LETTERS: ReadonlyArray<Seat> = ["A", "B", "C", "D", "E", "F"];
 
 export const DEFAULT_CONCURRENCY = 2;
-
-export const DEFAULT_MAX_ROUNDS = 100;
 
 export interface PlannedGame {
   readonly gameId: string;
@@ -106,4 +105,24 @@ export const newRunId = (now: Date, random: () => number): string => {
   const suffix = Array.from({ length: 8 }, () => Math.floor(random() * 16).toString(16)).join("");
 
   return `r-${now.getTime().toString(36)}-${suffix}`;
+};
+
+/** The engine config of a planned game: engine defaults overridden by the run's settings. */
+export const gameConfigOf = (game: PlannedGame, config: RunConfig): GameConfig => {
+  const rules: Partial<{ -readonly [K in keyof RulesConfig]: RulesConfig[K] }> = {};
+
+  if (config.maxRounds !== undefined) rules.maxRounds = config.maxRounds;
+
+  if (config.tableFrequency !== undefined) rules.tableFrequency = config.tableFrequency;
+
+  return createConfig({
+    gameId: game.gameId,
+    seed: game.seed,
+    seats: game.seats.map((seat) => ({
+      seat: seat.seat,
+      label: seat.label,
+      competitorId: seat.competitorId,
+    })),
+    rules,
+  });
 };
