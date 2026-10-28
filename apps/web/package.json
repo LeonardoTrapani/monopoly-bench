@@ -1,0 +1,33 @@
+{
+  "name": "@mb/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vp dev",
+    "dev:mock": "VITE_API_MODE=mock vp dev",
+    "build": "vp build",
+    "build:mock": "VITE_API_MODE=mock vp build",
+    "preview": "vp preview"
+  },
+  "dependencies": {
+    "@effect/platform-browser": "4.0.0",
+    "@foldkit/ui": "0.169.0",
+    "@fontsource-variable/archivo": "5.3.0",
+    "@fontsource-variable/inter": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.3.0",
+    "@mb/api": "workspace:*",
+    "@mb/engine": "workspace:*",
+    "@mb/sim": "workspace:*",
+    "clsx": "2.1.1",
+    "effect": "4.0.0",
+    "foldkit": "0.169.0"
+  },
+  "devDependencies": {
+    "@foldkit/oxlint-plugin": "0.15.3",
+    "@foldkit/vite-plugin": "0.28.0",
+    "@tailwindcss/vite": "4.3.3",
+    "tailwindcss": "4.3.3",
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.4.0"
+  }
+}
