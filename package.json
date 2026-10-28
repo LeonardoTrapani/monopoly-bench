@@ -19,7 +19,9 @@
   },
   "overrides": {
     "@effect/platform-browser": "4.0.0",
+    "@effect/platform-bun": "4.0.0",
     "@effect/platform-node": "4.0.0",
+    "@effect/platform-node-shared": "4.0.0",
     "@effect/vitest": "4.0.0",
     "effect": "4.0.0"
   },
