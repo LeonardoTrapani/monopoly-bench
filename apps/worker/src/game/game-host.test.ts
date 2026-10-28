@@ -37,6 +37,11 @@ interface Options {
   readonly failCharge?: number;
 }
 
+/** Runs inside D1 `finish`, to deliver a report while the game is being archived. */
+interface FinishHooks {
+  duringFinish: (() => Promise<void>) | null;
+}
+
 const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
   const sql = memorySqlPort();
   const wakes: Array<WakeRequest> = [];
@@ -50,8 +55,7 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
   let alarmsRun = 0;
   const clock = { now: 1_000_000 };
   const failures = { recordWake: options.failRecordWake ?? 0, charge: options.failCharge ?? 0 };
-  /** Runs inside D1 `finish`, to deliver a report while the game is being archived. */
-  const hooks: { duringFinish: (() => Promise<void>) | null } = { duringFinish: null };
+  const hooks: FinishHooks = { duringFinish: null };
 
   const host = new GameHost(
     {
