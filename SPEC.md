@@ -408,7 +408,10 @@ Built only from data (no randomness):
 
 Context resets at every new decision; inside one session the rounds of that session
 continue the same conversation (Pi follow-up messages). Notes are the only memory
-across decisions.
+across decisions. A session is one engine frame (a table, an auction, a debt): its rounds
+share the frame id. The digest keeps the last 80 lines. A rendered example lives in
+`packages/agent/src/__snapshots__/wake-message.txt`; the system prompt is built from the
+game's `RulesConfig`.
 
 ### 6.3 Tools
 
@@ -423,7 +426,11 @@ return an error with the engine's reason and count as invalid actions.
 Tools that answer the question end the wake (`terminate: true`): `done`, `buy`,
 `decline`, `pay_jail_fine`, `use_jail_card`, `roll_for_doubles`, `bid`, `pass_bid`,
 `declare_bankruptcy`, and `keep_mortgage`/`pay_off_mortgage` when no mortgaged deed is
-left to decide. Parameter schemas are derived from the engine's Effect schemas.
+left to decide. Parameters mirror the engine's commands without `seat` and `decisionId`
+(which the host adds); a test checks fields and literals (group ids, seats) against the
+engine's `Command` schema. Deeds are accepted by printed name, slug (`boardwalk`), unique
+slug prefix or board position; offer ids are integers; omitted `give`/`get` fields mean
+none. Every refusal returns the engine's `IllegalCommand` reason.
 
 ### 6.4 Limits per wake
 
@@ -478,11 +485,14 @@ Public (read-only, CORS open):
 - `GET /api/leaderboard?players=4`
 - `GET /api/models`, `GET /api/models/:id`
 - `GET /api/runs`, `GET /api/runs/:id`
-- `GET /api/games?status=live|finished&players=&model=`, `GET /api/games/:id`
+- `GET /api/games?status=live|finished&players=&model=` (`live` = running games;
+  `finished` = finished, aborted or failed), `GET /api/games/:id`
 - `GET /api/games/:id/events?since=` (NDJSON, one event per line with `seq > since`;
   live from GameDO, finished from R2)
 - `GET /api/games/:id/transcripts?seat=` (NDJSON `WakeTranscript`s; live from GameDO,
   finished from R2 `seats/<seat>.jsonl`)
+- `GET /api/games/:id/config` (the engine `GameConfig` JSON, so viewers can run
+  `replay(config, events)`; live from GameDO, finished from R2 `config.json`)
 - `GET /api/games/:id/ws` (spectator WebSocket: server → client only; messages `Hello`,
   `Events`, `Activity`, `Status`, see `apps/worker/README.md`)
 
@@ -499,10 +509,12 @@ Secrets (Alchemy, from env): `BENCH_API_KEY`, `OPENROUTER_API_KEY`.
 `auctions`, `ratings`, `rating_history`, plus `rating_tables`/`rating_guard` for the
 optimistic concurrency of rating updates. One row per wake (`wakes`) holds kind, round,
 reasons, latency, tokens, cost, tool calls, invalid actions, timeout; per-seat usage is
-aggregated from it when read.
+aggregated from it when read. A wake that never reports back still gets a row at
+GameDO's deadline (timed out, `endReason: "noReport"`).
 
-**R2**: `games/<gameId>/events.jsonl`, `games/<gameId>/summary.json`,
-`games/<gameId>/seats/<seat>.jsonl` (full transcript with reasoning and notes).
+**R2**: `games/<gameId>/config.json` (engine `GameConfig`), `games/<gameId>/events.jsonl`,
+`games/<gameId>/summary.json`, `games/<gameId>/seats/<seat>.jsonl` (full transcript with
+reasoning and notes).
 
 ---
 
@@ -558,10 +570,13 @@ Routes:
 
 ## 10. CLI (`apps/cli`)
 
-- `mb sim [--players N] [--seed S] [--bots random,heuristic,...] [--max-rounds R] [--table-frequency F] [--game-id ID] [--out DIR] [--no-out] [--verify] [--llm <openrouter id>...]`
+- `mb sim [--players N] [--seed S] [--bots random,heuristic,...] [--llm <openrouter id>[,<id>]] [--seats heuristic,llm:<id>,...] [--reasoning R] [--max-output-tokens N] [--budget-usd USD] [--max-rounds R] [--table-frequency F] [--game-id ID] [--out DIR] [--no-out] [--verify]`
   — run a game in-process and print the standings; writes `out/<gameId>.events.jsonl`
-  (one encoded event per line) and `out/<gameId>.config.json`. `--llm` is not
-  implemented yet (bots only).
+  (one encoded event per line) and `out/<gameId>.config.json`. With LLM seats (`--llm`
+  appends them after `--bots`, `--seats` gives the full seat order) it runs the Pi harness
+  on OpenRouter (`OPENROUTER_API_KEY`), applies each tool call to the game as it comes,
+  stops hard at `--budget-usd` (default $0.50; the game is aborted), prints per-seat cost
+  and writes `out/<gameId>.transcripts.jsonl`.
 - `mb calibrate [--games N] [--players 2,3,4,5,6] [--bot heuristic] [--cap R]` — natural
   game length distribution of bot games, used for `maxRounds` (§12).
 - `mb run create <config.json>` / `mb run status <id>` — remote, uses `BENCH_API_KEY`
