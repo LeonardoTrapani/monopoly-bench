@@ -35,6 +35,14 @@ interface Options {
   /** Failures before D1 `recordWake` / RunDO `charge` start succeeding. */
   readonly failRecordWake?: number;
   readonly failCharge?: number;
+  /** R2 writes wait for `archiveGate.release()`. */
+  readonly holdArchive?: boolean;
+}
+
+interface ArchiveGate {
+  calls: number;
+  release: () => void;
+  opened: Promise<void>;
 }
 
 /** Runs inside D1 `finish`, to deliver a report while the game is being archived. */
@@ -56,6 +64,13 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
   const clock = { now: 1_000_000 };
   const failures = { recordWake: options.failRecordWake ?? 0, charge: options.failCharge ?? 0 };
   const hooks: FinishHooks = { duringFinish: null };
+  const archiveGate: ArchiveGate = { calls: 0, release: () => {}, opened: Promise.resolve() };
+
+  if (options.holdArchive === true) {
+    archiveGate.opened = new Promise((resolve) => {
+      archiveGate.release = resolve;
+    });
+  }
 
   const host = new GameHost(
     {
@@ -78,6 +93,8 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
       },
       archive: {
         put: async (key, body) => {
+          archiveGate.calls += 1;
+          await archiveGate.opened;
           archive.set(key, body);
         },
       },
@@ -187,6 +204,7 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
     call,
     lastWake,
     hooks,
+    archiveGate,
     alarmsRun: () => alarmsRun,
     pendingAlarm: () => alarm,
   };
@@ -575,6 +593,33 @@ describe("GameHost with the real engine", () => {
 
     expect(h.host.status()).toBe("aborted");
     expect(h.finishes[0]?.endReason).toBe("aborted");
+  });
+
+  it("waits for archive writes in flight before a purge returns (F3)", async () => {
+    const h = setup([random(), random()], { maxRounds: 1, holdArchive: true });
+    const order: Array<string> = [];
+
+    await h.host.start(h.start);
+
+    const draining = h.drain();
+
+    for (let tick = 0; tick < 500 && h.archiveGate.calls === 0; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+
+    expect(h.archiveGate.calls).toBeGreaterThan(0);
+
+    const purged = h.host.purge().then(() => order.push("purged"));
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(order).toEqual([]);
+
+    order.push("released");
+    h.archiveGate.release();
+    await purged;
+    await draining;
+
+    expect(order).toEqual(["released", "purged"]);
   });
 
   it("forgets a purged game: nothing stored, no alarm, late reports and calls write nothing", async () => {

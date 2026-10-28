@@ -172,18 +172,26 @@ export const catalogFromListings = (
 const bundledCachePrice = (price: number, input: number): number | null =>
   price === 0 && input > 0 ? null : price;
 
+/**
+ * OpenRouter's own routers (`openrouter/auto`, …) bill whatever model they pick: pi-ai lists
+ * them without a usable price, like the live list's "-1".
+ */
+const isVariablePriceRouter = (model: string): boolean => providerSlugOf(model) === "openrouter";
+
 const bundledEntry = (model: Model<Api>): ModelCatalogEntry =>
   completeEntry({
     model: model.id,
     ...modelNaming(model.id, model.name),
     reasoning: model.reasoning,
     contextLength: integerOrNull(model.contextWindow),
-    pricing: {
-      inputPerMTok: model.cost.input,
-      outputPerMTok: model.cost.output,
-      cacheReadPerMTok: bundledCachePrice(model.cost.cacheRead, model.cost.input),
-      cacheWritePerMTok: bundledCachePrice(model.cost.cacheWrite, model.cost.input),
-    },
+    pricing: isVariablePriceRouter(model.id)
+      ? null
+      : {
+          inputPerMTok: model.cost.input,
+          outputPerMTok: model.cost.output,
+          cacheReadPerMTok: bundledCachePrice(model.cost.cacheRead, model.cost.input),
+          cacheWritePerMTok: bundledCachePrice(model.cost.cacheWrite, model.cost.input),
+        },
   });
 
 /**

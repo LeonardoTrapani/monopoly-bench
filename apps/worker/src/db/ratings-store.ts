@@ -136,6 +136,15 @@ const guardStatements = (
   sql`DELETE FROM rating_guard`,
 ];
 
+/** False once the game's run was deleted (or the game never finished). */
+const isFinishedGame = Effect.fn("isFinishedGame")(function* (gameId: string) {
+  const sql = yield* SqlClient.SqlClient;
+
+  const rows = yield* sql`SELECT 1 AS one FROM games WHERE id = ${gameId} AND status = 'finished'`;
+
+  return rows.length > 0;
+});
+
 const attempt = Effect.fn("rateAttempt")(function* (playersCount: number, game: RatedGame) {
   const sql = yield* SqlClient.SqlClient;
   const competitors = [...new Set(game.seats.map((seat) => seat.competitorId))];
@@ -150,6 +159,10 @@ const attempt = Effect.fn("rateAttempt")(function* (playersCount: number, game: 
   yield* batchAll(
     [
       ...guardStatements(sql, playersCount, version, game.at),
+      // A run deleted meanwhile took the game with it: rate nothing (the batch aborts).
+      sql`INSERT INTO rating_guard (ok)
+        SELECT COUNT(*) FROM games WHERE id = ${game.gameId} AND status = 'finished'`,
+      sql`DELETE FROM rating_guard`,
       ...applyGame(priors, game).flatMap((rating) => [
         sql`INSERT OR REPLACE INTO ratings ${sql.insert(ratingRow(playersCount, rating))}`,
         sql`INSERT INTO rating_history ${sql.insert({
@@ -174,6 +187,8 @@ export const applyGameRatings = Effect.fn("applyGameRatings")(function* (input: 
 
   for (let index = 0; index < MAX_ATTEMPTS; index += 1) {
     if (yield* alreadyRated(input.gameId)) return "alreadyRated" satisfies RatingUpdate;
+
+    if (!(yield* isFinishedGame(input.gameId))) return "unrated" satisfies RatingUpdate;
 
     const outcome = yield* Effect.result(attempt(input.playersCount, game));
 

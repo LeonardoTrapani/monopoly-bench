@@ -138,6 +138,8 @@ describe("rating store", () => {
   it("rates a game once and accumulates games and wins", async () => {
     const h = setup();
 
+    h.storeGames([duel("g1", "llm-x", "llm-y"), duel("g2", "llm-x", "llm-y")]);
+
     expect(await h.run(applyGameRatings(duel("g1", "llm-x", "llm-y")))).toBe("rated");
     expect(await h.run(applyGameRatings(duel("g1", "llm-x", "llm-y")))).toBe("alreadyRated");
     expect(await h.run(applyGameRatings(duel("g2", "llm-x", "llm-y")))).toBe("rated");
@@ -211,9 +213,24 @@ describe("rating store", () => {
   });
 });
 
+describe("rating of a deleted game", () => {
+  it("rates nothing when the game's run was deleted before the update ran (F2)", async () => {
+    const h = setup();
+    const input = duel("g1", "llm-x", "llm-y");
+
+    h.storeGames([input]);
+    h.d1.db.exec("DELETE FROM seats WHERE game_id = 'g1'; DELETE FROM games WHERE id = 'g1';");
+
+    expect(await h.run(applyGameRatings(input))).toBe("unrated");
+    expect(await h.table(2)).toEqual({ ratings: [], history: [] });
+  });
+});
+
 describe("rating replay", () => {
   it("rebuilds exactly what the games produced one by one", async () => {
     const incremental = setup();
+
+    incremental.storeGames(games);
 
     for (const input of games) await incremental.run(applyGameRatings(input));
 
@@ -228,6 +245,8 @@ describe("rating replay", () => {
   it("rates the remaining games as if a deleted game never happened", async () => {
     const kept = games.filter((input) => input.gameId !== "g2");
     const reference = setup();
+
+    reference.storeGames(kept);
 
     for (const input of kept) await reference.run(applyGameRatings(input));
 

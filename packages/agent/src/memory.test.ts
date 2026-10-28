@@ -19,6 +19,8 @@ import {
   encodeAgentMessage,
   estimateConversationTokens,
   type MemoryLimits,
+  needsCompaction,
+  wakesToKeep,
 } from "./memory.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import { runWake, transcriptText, type WakeResult } from "./run-wake.ts";
@@ -247,6 +249,42 @@ describe("whole-game memory", () => {
       "Wake 3: the table ",
       "Wake 4: the table ",
     ]);
+  });
+
+  it("compacts before the usual 6 wakes when a small window fills, keeping fewer wakes (F5)", () => {
+    const scripted = scriptedModel([]);
+
+    // 1,000-token window: the hard limit is 600 tokens, half of it 300.
+    const context = {
+      model: { ...scripted.model, contextWindow: 1_000 },
+      streamFn: scripted.streamFn,
+      apiKey: undefined,
+      reasoning: undefined,
+      systemPrompt: "You play Monopoly.",
+      sessionId: undefined,
+      memory: DEFAULT_MEMORY_LIMITS,
+      now: () => 0,
+    };
+
+    // Five wakes of about 150 tokens each, one user message per wake.
+    const wake = (index: number): AgentMessage => ({
+      role: "user",
+      content: `${index}`.repeat(600),
+      timestamp: index,
+    });
+
+    const conversation: Conversation = {
+      messages: [1, 2, 3, 4, 5].map(wake),
+      wakeStarts: [0, 1, 2, 3, 4],
+    };
+
+    expect(needsCompaction(context, conversation, "next")).toBe(true);
+    expect(wakesToKeep(context, conversation)).toBe(2);
+
+    // A large window keeps the usual rule: no compaction before 6 wakes.
+    const roomy = { ...context, model: { ...scripted.model, contextWindow: 1_000_000 } };
+
+    expect(needsCompaction(roomy, conversation, "next")).toBe(false);
   });
 
   it("uses the same budget for every model, capped at 60% of a small context window", () => {

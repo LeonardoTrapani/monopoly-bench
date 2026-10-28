@@ -122,6 +122,17 @@ describe("model catalog", () => {
 
     expect(runModelProblem(bundled, "anthropic/claude-haiku-5.5")).toBeNull();
     expect(runModelProblem(bundled, "nobody/nothing")).toContain("is not in the catalog");
+    expect(runModelProblem(bundled, "openrouter/auto")).toContain("no fixed price");
+  });
+
+  it("refuses models whose context window cannot hold a seat (F5)", () => {
+    const listings = listingsOfModelList(openRouterModelListSample()).map((listing) =>
+      listing.id === "anthropic/claude-haiku-5.5" ? { ...listing, context_length: 8_000 } : listing,
+    );
+
+    expect(runModelProblem(liveSnapshot(listings, "now"), "anthropic/claude-haiku-5.5")).toContain(
+      "8000-token context window",
+    );
   });
 });
 

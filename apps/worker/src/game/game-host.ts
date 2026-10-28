@@ -182,6 +182,8 @@ export class GameHost<S, E extends EngineEvent, C> {
   private progressTurn = -1;
   /** The game was deleted: work still in flight must not write anything more. */
   private purged = false;
+  /** R2 writes in flight: purge waits for them, so none lands after the archive is deleted. */
+  private readonly archiveWrites = new Set<Promise<void>>();
 
   constructor(
     private readonly ports: GameHostPorts,
@@ -373,6 +375,7 @@ export class GameHost<S, E extends EngineEvent, C> {
     this.state = undefined;
     this.finishPending = false;
     await this.ports.setAlarm(null);
+    await Promise.allSettled(this.archiveWrites);
   }
 
   async alarm(): Promise<void> {
@@ -1178,7 +1181,15 @@ export class GameHost<S, E extends EngineEvent, C> {
   private async archivePut(key: string, body: string, contentType: string): Promise<void> {
     if (this.purged) return;
 
-    await this.ports.archive.put(key, body, contentType);
+    const write = this.ports.archive.put(key, body, contentType);
+
+    this.archiveWrites.add(write);
+
+    try {
+      await write;
+    } finally {
+      this.archiveWrites.delete(write);
+    }
   }
 
   private eventsAfter(since: number): ReadonlyArray<E> {

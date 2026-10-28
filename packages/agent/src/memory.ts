@@ -177,14 +177,48 @@ export interface Compaction {
 }
 
 /** Whether the conversation must be compacted before a wake sending `message`. */
+/** 60% of the model's context window: the hard limit, whatever `compactAtTokens` says. */
+const contextLimit = (contextWindow: number): number =>
+  contextWindow > 0 ? Math.floor(contextWindow * MAX_CONTEXT_SHARE) : Number.POSITIVE_INFINITY;
+
+/**
+ * Whether the conversation must be compacted before a wake sending `message`: over the budget
+ * once more than `keepRecentWakes` wakes exist, or over the model's context limit at any time
+ * (small windows then keep fewer wakes verbatim, see `wakesToKeep`).
+ */
 export const needsCompaction = (
   context: CompactionContext,
   conversation: Conversation,
   message: string,
-): boolean =>
-  conversation.wakeStarts.length > context.memory.keepRecentWakes &&
-  estimateConversationTokens(conversation.messages, message) >
-    compactionBudget(context.memory, context.model.contextWindow);
+): boolean => {
+  const tokens = estimateConversationTokens(conversation.messages, message);
+  const wakes = conversation.wakeStarts.length;
+
+  return (
+    (wakes > context.memory.keepRecentWakes &&
+      tokens > compactionBudget(context.memory, context.model.contextWindow)) ||
+    (wakes > 0 && tokens > contextLimit(context.model.contextWindow))
+  );
+};
+
+/**
+ * How many recent wakes stay verbatim: `keepRecentWakes`, fewer when they would fill more than
+ * half of the model's context limit, and never all of them, so something is folded.
+ */
+export const wakesToKeep = (context: CompactionContext, conversation: Conversation): number => {
+  const { messages, wakeStarts } = conversation;
+  const half = contextLimit(context.model.contextWindow) / 2;
+  const most = Math.min(context.memory.keepRecentWakes, wakeStarts.length - 1);
+
+  for (let keep = most; keep > 0; keep -= 1) {
+    const start = wakeStarts[wakeStarts.length - keep] ?? messages.length;
+    const chars = messages.slice(start).reduce((sum, message) => sum + messageChars(message), 0);
+
+    if (charsToTokens(chars) <= half) return keep;
+  }
+
+  return 0;
+};
 
 interface SummaryResponse {
   readonly text: string;
@@ -274,7 +308,8 @@ export const compactConversation = async (
   signal: AbortSignal,
 ): Promise<Compaction> => {
   const { messages, wakeStarts } = conversation;
-  const kept = wakeStarts.slice(-context.memory.keepRecentWakes);
+  const keep = wakesToKeep(context, conversation);
+  const kept = keep === 0 ? [] : wakeStarts.slice(-keep);
   const cut = kept[0] ?? messages.length;
   const summarizedWakes = wakeStarts.length - kept.length;
   const head = messages[0]?.role === "system" ? 1 : 0;

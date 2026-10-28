@@ -115,6 +115,9 @@ export class ModelCatalog {
   }
 }
 
+/** Smallest context window a seat can play with: ~10k fixed tokens plus room for memory. */
+export const MIN_CONTEXT_TOKENS = 32_000;
+
 /**
  * Why a run may not seat `model`, or null when it may: it must be a catalog model (tool
  * calling) with a fixed price, since a run's budget is enforced from the price.
@@ -130,6 +133,10 @@ export const runModelProblem = (snapshot: CatalogSnapshot, model: string): strin
 
   if (entry.pricing === null) {
     return `Model "${model}" has no fixed price on OpenRouter (a router or variable-price model), so the run budget cannot be enforced.`;
+  }
+
+  if (entry.contextLength !== null && entry.contextLength < MIN_CONTEXT_TOKENS) {
+    return `Model "${model}" has a ${entry.contextLength}-token context window; seats need at least ${MIN_CONTEXT_TOKENS} (system prompt, tools and a wake take about 10k).`;
   }
 
   return null;

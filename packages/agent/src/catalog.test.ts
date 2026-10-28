@@ -95,6 +95,13 @@ describe("model catalog", () => {
     });
   });
 
+  it("gives the bundled list's OpenRouter routers no price, so runs cannot seat them (F1)", () => {
+    const routers = bundledCatalog().filter((candidate) => candidate.providerSlug === "openrouter");
+
+    expect(routers.length).toBeGreaterThan(0);
+    expect(routers.every((router) => router.pricing === null)).toBe(true);
+  });
+
   it("labels models by their pi-ai name", () => {
     expect(catalogLabel("anthropic/claude-haiku-5.5")).toBe("Claude Haiku 5.5");
     expect(catalogLabel("example/unknown")).toBe("example/unknown");
