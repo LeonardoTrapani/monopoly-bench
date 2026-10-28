@@ -45,7 +45,7 @@ code and this document disagree, fix one of them in the same change.
 | Lint            | Oxlint through Vite+, type-aware, plus vendored anti-slop rules (`tools/oxlint/anti-slop`)   |
 | Core library    | Effect **4.0.0** pinned everywhere (Foldkit requires exactly 4.0.0)                          |
 | Frontend        | Foldkit (Elm architecture on Effect), Tailwind, served as Worker static assets               |
-| Agents          | `@earendil-works/pi-agent-core`, `pi-ai` (OpenRouter); sessions persisted in PlayerDO SQLite |
+| Agents          | `@earendil-works/pi-agent-core`, `pi-ai` (OpenRouter); conversations kept in PlayerDO SQLite |
 | Infra           | Cloudflare Workers, Durable Objects, D1, R2 — defined with Alchemy v2                        |
 
 ```
@@ -396,7 +396,7 @@ The system prompt (same for everyone): role, rules summary (§3), declared varia
 how rounds and wake-ups work, tool usage, and the objective (finish first; at the turn
 cap, highest net worth). English.
 
-### 6.2 Wake message
+### 6.2 Wake message and memory
 
 Built only from data (no randomness):
 
@@ -406,12 +406,31 @@ Built only from data (no randomness):
 4. open offers and threads with comments,
 5. the seat's notes.
 
-Context resets at every new decision; inside one session the rounds of that session
-continue the same conversation (Pi follow-up messages). Notes are the only memory
-across decisions. A session is one engine frame (a table, an auction, a debt): its rounds
-share the frame id. The digest keeps the last 80 lines. A rendered example lives in
+**Whole-game memory.** Each seat keeps one conversation for the whole game: every wake
+appends its wake message as a new user turn, then the model's calls and their results. The
+conversation is append-only, so every request extends the previous one and provider prompt
+caching keeps working (one provider session id per seat, `<gameId>:<seat>`). It is persisted
+in PlayerDO SQLite (one row per message) and kept in memory by the CLI simulation.
+
+**Compaction**, the only rewrite. Before a wake whose request would exceed a fixed budget,
+the same for every model (`compactAtTokens` = 80 000 tokens, lowered to 60% of the model's
+context window when that is smaller; estimated from the last response's reported prompt and
+output tokens plus about one token per 4 characters for what follows), the same model, with
+the same reasoning level and session, writes a summary of the older part with a fixed
+instruction (`COMPACTION_PROMPT`: standings, its own plans, promises made and received, reads
+on opponents, trade history, anything still pending; at most about 1 500 output tokens). The
+conversation becomes: system message, that summary (as a user turn), the last 6 wakes
+verbatim. The summary's usage and cost count in the wake that triggered it; its transcript
+`text` starts with a `[memory]` line and the summary, and the D1 `wakes.compactions` column
+records it. A summary request that fails leaves the conversation as it was (it is compacted
+at a later wake); an empty summary drops the older part, so the conversation stays bounded.
+
+Notes live outside the conversation and are shown in every wake message, so they survive
+compaction. A session is one engine frame (a table, an auction, a debt): its rounds share the
+frame id. The digest keeps the last 80 lines. A rendered example lives in
 `packages/agent/src/__snapshots__/wake-message.txt`; the system prompt is built from the
-game's `RulesConfig`.
+game's `RulesConfig` and tells every model that its conversation lasts the game and that
+notes are never summarized.
 
 ### 6.3 Tools
 
@@ -451,8 +470,24 @@ deeds from the cheapest), then pay or bankruptcy. Each default is recorded.
 ### 6.6 Seat kinds
 
 - `llm`: `{ model: <OpenRouter id>, label, reasoning?: "off" | "low" | "medium" | "high", maxOutputTokens? }`
-- `bot`: `{ policy: "random" | "heuristic" }` — runs in-process, no LLM. Bots appear on
-  the leaderboard as baselines.
+- `bot`: `{ policy: "random" | "heuristic" }` — runs in-process, no LLM. Bots play in engine
+  tests and local simulations (`mb sim`) only: public runs seat LLMs only (§8) and bots never
+  appear on the leaderboard.
+
+### 6.7 Model catalog
+
+`GET /api/catalog` lists the OpenRouter models a run may seat: OpenRouter's public model list
+(`GET https://openrouter.ai/api/v1/models`, no key) filtered to models whose
+`supported_parameters` include `tools`, mapped to `ModelCatalogEntry` (label and provider
+from the `"Provider: Model"` name, or a small slug → name map; `reasoning` when
+`supported_parameters` include `reasoning`; prices per million tokens from
+`pricing.prompt | completion | input_cache_read | input_cache_write` × 10⁶;
+`estimatedSeatCostUsd` from `estimateSeatCostUsd`). Featured models (`featuredModels`) come
+first in that order, then the others by provider and label. The Worker caches the list for an
+hour per isolate; when OpenRouter fails it serves pi-ai's bundled OpenRouter list (`source:
+"bundled"`, retried after 5 minutes). A run may seat only catalog models with a fixed price
+(routers priced per request have `pricing: null`), since its budget is enforced from prices.
+The CLI labels models from pi-ai's bundled list (`catalogLabel`).
 
 ---
 
@@ -467,23 +502,28 @@ deeds from the cheapest), then pay or bankruptcy. Each default is recorded.
   WebSockets, writes summaries to D1 at turn end, archives to R2 at the end, then
   notifies its RunDO.
 - **PlayerDO** (one per LLM seat per game): runs the Pi agent for a wake
-  (`pi-agent-core` directly, the same loop as local simulations; the session's messages
-  are persisted in the object's SQLite; alarm-driven so no request stays open while the
-  model thinks). Tools call GameDO RPC (`submit`, `done`, `inspect`). Every RPC carries
+  (`pi-agent-core` directly, the same loop as local simulations; the seat's whole-game
+  conversation (§6.2) is persisted in the object's SQLite; alarm-driven so no request stays
+  open while the model thinks). Before each wake it asks its RunDO who pays
+  (`credentials()`): the server's `OPENROUTER_API_KEY`, or an own-key run's key, held in
+  memory for that wake only (an own-key run whose key was deleted never falls back to the
+  server's). Tools call GameDO RPC (`submit`, `done`, `inspect`). Every RPC carries
   `(gameId, seat, decisionId, callId)`; duplicates are ignored (idempotency). A wake cut
   off by an eviction is not re-run: it is reported and GameDO applies the default.
   `pi-durable` was evaluated and not used (reasons in `apps/worker/README.md`).
 - **RunDO** (one per run): queue of games, concurrency limit, budget accounting,
   ratings update when a game finishes (a version-guarded D1 batch, since several runs
-  may finish games at once).
-- Bot seats run inside GameDO.
+  may finish games at once), an own-key run's key and cancel-token hash, and the purge of
+  a deleted run (its GameDOs and PlayerDOs are emptied, then its own storage).
+- Bot seats run inside GameDO (engine tests; public runs have none).
 
 ### 7.2 API
 
 Public (read-only, CORS open):
 
+- `GET /api/catalog` (`CatalogResponse`, §6.7)
 - `GET /api/leaderboard?players=4`
-- `GET /api/models`, `GET /api/models/:id`
+- `GET /api/models`, `GET /api/models/:id` (LLM competitors only; a bot id is 404)
 - `GET /api/runs`, `GET /api/runs/:id`
 - `GET /api/games?status=live|finished&players=&model=` (`live` = running games;
   `finished` = finished, aborted or failed), `GET /api/games/:id`
@@ -496,21 +536,45 @@ Public (read-only, CORS open):
 - `GET /api/games/:id/ws` (spectator WebSocket: server → client only; messages `Hello`,
   `Events`, `Activity`, `Status`, see `apps/worker/README.md`)
 
-Protected (`Authorization: Bearer <BENCH_API_KEY>`):
+Runs (CORS allows the `authorization`, `x-openrouter-key` and `x-run-token` headers and the
+`DELETE` method):
 
-- `POST /api/runs` — create and start a run (body = `RunConfig`)
-- `POST /api/runs/:id/cancel` — returns `{ run: RunSummary }`
+- `POST /api/runs` — create and start a run (body = `RunConfig`, §8), paid by one of:
+  - the bench: `Authorization: Bearer <BENCH_API_KEY>` → `funding: "server"`;
+  - the creator's own OpenRouter key: `x-openrouter-key: <key>` (no bench key needed; the
+    header decides who pays) → `funding: "ownKey"`. The key is checked with OpenRouter's
+    `GET /api/v1/key` before the run starts: refused → `401`; OpenRouter unreachable →
+    `502`; a key whose `limit_remaining` is below `budgetUsd` → `400`.
 
-Secrets (Alchemy, from env): `BENCH_API_KEY`, `OPENROUTER_API_KEY`.
+  Body checks come first (`400`): a bot seat ("Public runs seat LLMs only"), a schema error,
+  a model that is not in the catalog, does not support tools or has no fixed price.
+  Response `201 CreateRunResponse { run, cancelToken }`: `cancelToken` (random, 32 bytes
+  base64url) is returned only here and only for own-key runs; the run keeps its SHA-256.
+
+- `POST /api/runs/:id/cancel` — with the bench bearer, or `x-run-token: <cancelToken>` for
+  an own-key run; `200 { run, cancelToken: null }` (a `CreateRunResponse`), `401`, `404`.
+- `DELETE /api/runs/:id` — bench bearer only: stops the run's games for good (their
+  Durable Objects are emptied), deletes its R2 archives (`games/<gameId>/…`) and D1 rows
+  (runs, games, seats, wakes, offers, auctions, rating history), then replays the ratings of
+  its player count (§8); `204`, `401`, `404`.
+
+An own key is kept only in the run's RunDO SQLite while the run is active and deleted when the
+run finishes, is cancelled or is deleted; PlayerDOs read it per wake. It is never written to
+D1, R2, transcripts, logs, API responses or spectator messages (a provider error that echoed
+it is scrubbed to `[redacted key]`); an end-to-end test scans all of them. The budget cap
+applies to both kinds of runs.
+
+Secrets (Alchemy, from env): `BENCH_API_KEY`, `OPENROUTER_API_KEY` (server-funded runs).
 
 ### 7.3 Storage
 
 **D1** (via `@effect/sql-d1`), tables: `runs`, `games`, `seats`, `wakes`, `offers`,
 `auctions`, `ratings`, `rating_history`, plus `rating_tables`/`rating_guard` for the
-optimistic concurrency of rating updates. One row per wake (`wakes`) holds kind, round,
-reasons, latency, tokens, cost, tool calls, invalid actions, timeout; per-seat usage is
-aggregated from it when read. A wake that never reports back still gets a row at
-GameDO's deadline (timed out, `endReason: "noReport"`).
+optimistic concurrency of rating updates. `runs.funding` is `server` or `ownKey`. One row
+per wake (`wakes`) holds kind, round, reasons, latency, tokens, cost, tool calls, invalid
+actions, timeout and memory compactions (§6.2); per-seat usage is aggregated from it when
+read. A wake that never reports back still gets a row at GameDO's deadline (timed out,
+`endReason: "noReport"`).
 
 **R2**: `games/<gameId>/config.json` (engine `GameConfig`), `games/<gameId>/events.jsonl`,
 `games/<gameId>/summary.json`, `games/<gameId>/seats/<seat>.jsonl` (full transcript with
@@ -523,7 +587,7 @@ reasoning and notes).
 ```ts
 RunConfig {
   name?: string
-  players: SeatSpec[]            // 2..6 seats (llm or bot)
+  players: LlmSeat[]             // 2..6 LLM seats: public runs never seat bots
   seeds: number                  // number of seeds; games = seeds × players (cyclic seat rotation)
   maxRounds?: number             // turn cap override
   tableFrequency?: "everyRoll" | "everyTurn" | "everyRound" | "off"
@@ -534,13 +598,22 @@ RunConfig {
 
 All rotations of one seed share the game seed (same dice and decks, competitors moved
 one seat along); seed `s` derives from `s` alone, so it is the same in every run. The
-budget gates LLM wakes only: games without LLM seats cost nothing and still run when
-the budget is spent.
+budget gates LLM wakes, whoever pays (server or own key, §7.2): once spent, no wake starts,
+running games abort and queued ones are skipped. A run is charged at the prices of its
+catalog snapshot (§6.7), taken when it is created.
 
 Ratings: OpenSkill (Plackett–Luce), one table per player count, ranks from final
 standings. Leaderboard score = `mu − 3σ`. A competitor holding several seats of one
-game is rated per seat from the same prior and gets the mean of the posteriors. Also shown: games, wins, average place,
-average net worth, invalid-action rate, timeout rate, cost per game, latency per wake.
+game is rated per seat from the same prior and gets the mean of the posteriors. Only games
+where every seat is an LLM count: a game with a bot seat (local tools, or data from before
+public runs were LLM-only) is never rated and is left out of the leaderboard, head-to-head,
+models list and model profiles, as are bot competitors. Also shown: games, wins, average
+place, average net worth, invalid-action rate, timeout rate, cost per game, latency per wake.
+
+Deleting a run (`DELETE /api/runs/:id`) rebuilds the rating table and rating history of its
+player count by replaying the remaining finished games in `finished_at` order from the
+default prior, with the same OpenSkill code as the update after each game (a replay of
+untouched data reproduces the table exactly).
 
 ---
 
@@ -576,11 +649,16 @@ Routes:
   appends them after `--bots`, `--seats` gives the full seat order) it runs the Pi harness
   on OpenRouter (`OPENROUTER_API_KEY`), applies each tool call to the game as it comes,
   stops hard at `--budget-usd` (default $0.50; the game is aborted), prints per-seat cost
-  and writes `out/<gameId>.transcripts.jsonl`.
+  and writes `out/<gameId>.transcripts.jsonl`. Each LLM seat keeps its whole-game
+  conversation in memory with the same compaction as PlayerDO (§6.2); LLM seats are labelled
+  from pi-ai's bundled model names, and a seat without a model id lists `featuredModels`.
 - `mb calibrate [--games N] [--players 2,3,4,5,6] [--bot heuristic] [--cap R]` — natural
   game length distribution of bot games, used for `maxRounds` (§12).
-- `mb run create <config.json>` / `mb run status <id>` — remote, uses `BENCH_API_KEY`
-  and `BENCH_URL`.
+- `mb run create <config.json> [--openrouter-key-env VAR]` / `mb run status <id>` — remote,
+  uses `BENCH_URL`. Creation sends `BENCH_API_KEY` as Bearer, or with
+  `--openrouter-key-env VAR` the OpenRouter key in `$VAR` as `x-openrouter-key` (an own-key
+  run, no bench key needed), and then prints the run's cancel token (shown once) with the
+  `curl` line that cancels it.
 
 ---
 
@@ -592,7 +670,11 @@ Routes:
 - Property tests: thousands of bot games (random + heuristic) across 2–6 players and
   seeds; invariants after every event; `replay(config, events)` equals the live state;
   every game terminates.
-- Agent harness tests with a scripted fake model (no network).
+- Agent harness tests with a scripted fake model (no network), including whole-game memory:
+  append-only requests, compaction, failed and empty summaries.
+- An own-key run end to end on `node:sqlite` fakes (API, RunDO, GameDO and PlayerDO logic, a
+  scripted model): the key reaches the model only; D1, R2, every Durable Object's storage,
+  API responses, spectator messages and logs are scanned for it.
 - Worker tests with a local Alchemy/workerd run of a bot-only game end to end.
 - One real low-budget LLM game before release.
 
@@ -612,6 +694,9 @@ Routes:
 | `maxRounds`                                 | 120 (calibrated, see below) |
 | `maxToolCallsPerWake` / `maxInvalidPerWake` | 24 / 6                      |
 | `wakeTimeoutMs`                             | 180 000                     |
+| memory: `compactAtTokens` (§6.2)            | 80 000 (≤ 60% of context)   |
+| memory: wakes kept / summary output tokens  | 6 / 1 500                   |
+| catalog cache (§6.7)                        | 1 h (bundled list: 5 min)   |
 | run `concurrency`                           | 2                           |
 
 **`maxRounds` calibration.** `bun apps/cli/src/main.ts calibrate --games 200 --cap 400
