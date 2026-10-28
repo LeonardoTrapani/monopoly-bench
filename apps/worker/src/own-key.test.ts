@@ -300,7 +300,7 @@ describe("own-key runs end to end", () => {
     expect(created.run.funding).toBe("ownKey");
     expect(created.cancelToken).toBe("cancel-token-1");
     // While the run is active, its RunDO holds the key: the scan below is meaningful.
-    expect(coordinator.credentials().openRouterKey).toBe(OWN_KEY);
+    expect(coordinator.credentials()?.openRouterKey).toBe(OWN_KEY);
 
     // Run every due alarm (the clock never moves, so deadlines never expire).
     for (let step = 0; step < 20_000; step += 1) {
@@ -315,7 +315,7 @@ describe("own-key runs end to end", () => {
     expect(coordinator.summary()?.status).toBe("finished");
     expect(keysSeen.length).toBeGreaterThan(4);
     expect(new Set(keysSeen)).toEqual(new Set([OWN_KEY]));
-    expect(coordinator.credentials()).toEqual({ funding: "ownKey", openRouterKey: null });
+    expect(coordinator.credentials()).toBeNull();
 
     await call("GET", "/api/runs");
     await call("GET", "/api/runs/r-own");

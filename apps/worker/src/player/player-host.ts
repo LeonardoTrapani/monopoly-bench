@@ -67,13 +67,16 @@ export interface PlayerHostPorts {
 }
 
 /**
- * The key a wake calls OpenRouter with: the run's own key for an own-key run (none once the
- * run deleted it, so the wake fails fast), never the server's.
+ * The key a wake calls OpenRouter with: the server's for a server-funded run, the run's own key
+ * for an own-key run, and none when the run is no longer active (`credentials` null) or deleted
+ * its key: the wake then fails fast instead of being billed to the server.
  */
 export const openRouterKeyFor = (
-  credentials: ModelCredentials,
+  credentials: ModelCredentials | null,
   serverKey: string,
 ): string | undefined => {
+  if (credentials === null) return undefined;
+
   if (credentials.funding === "ownKey") return credentials.openRouterKey ?? undefined;
 
   return serverKey.length === 0 ? undefined : serverKey;

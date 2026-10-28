@@ -306,9 +306,11 @@ describe("own-key runs", () => {
     );
     expect(openRouterKeyFor({ funding: "server", openRouterKey: null }, "")).toBeUndefined();
     expect(openRouterKeyFor({ funding: "ownKey", openRouterKey: "own" }, "server-key")).toBe("own");
-    // The run ended and deleted its key: the wake fails fast instead of billing the server.
+    // No key left, or the run is no longer active: the wake fails fast instead of billing the
+    // server.
     expect(
       openRouterKeyFor({ funding: "ownKey", openRouterKey: null }, "server-key"),
     ).toBeUndefined();
+    expect(openRouterKeyFor(null, "server-key")).toBeUndefined();
   });
 });

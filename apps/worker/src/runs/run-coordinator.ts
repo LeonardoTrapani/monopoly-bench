@@ -255,8 +255,16 @@ export class RunCoordinator {
     return { exhausted: isExhausted(outcome.budget) };
   }
 
-  /** PlayerDO → RunDO before every wake: who pays for it (SPEC §7.2). */
-  credentials(): ModelCredentials {
+  /**
+   * PlayerDO → RunDO before every wake: who pays for it (SPEC §7.2). Null unless the run is
+   * active: a wake of an ended, cancelled, deleted or unknown run gets no key at all, so it can
+   * never fall back to the server's key.
+   */
+  credentials(): ModelCredentials | null {
+    const status = this.run()?.status;
+
+    if (status !== "running" && status !== "queued") return null;
+
     const funding = this.funding();
 
     return {

@@ -506,8 +506,8 @@ The CLI labels models from pi-ai's bundled list (`catalogLabel`).
   conversation (§6.2) is persisted in the object's SQLite; alarm-driven so no request stays
   open while the model thinks). Before each wake it asks its RunDO who pays
   (`credentials()`): the server's `OPENROUTER_API_KEY`, or an own-key run's key, held in
-  memory for that wake only (an own-key run whose key was deleted never falls back to the
-  server's). Tools call GameDO RPC (`submit`, `done`, `inspect`). Every RPC carries
+  memory for that wake only. A run that is no longer active (ended, cancelled, deleted) gives
+  no key at all, and an own-key run never falls back to the server's. Tools call GameDO RPC (`submit`, `done`, `inspect`). Every RPC carries
   `(gameId, seat, decisionId, callId)`; duplicates are ignored (idempotency). A wake cut
   off by an eviction is not re-run: it is reported and GameDO applies the default.
   `pi-durable` was evaluated and not used (reasons in `apps/worker/README.md`).

@@ -166,8 +166,8 @@ export interface OwnKeyFunding {
 }
 
 /**
- * RunDO → PlayerDO before every wake: who pays. `openRouterKey` is the run's own key (null for a
- * server-funded run, or once an own-key run ended and its key was deleted).
+ * RunDO → PlayerDO before every wake of an active run: who pays. `openRouterKey` is the run's
+ * own key (null for a server-funded run).
  */
 export interface ModelCredentials {
   readonly funding: RunFunding;

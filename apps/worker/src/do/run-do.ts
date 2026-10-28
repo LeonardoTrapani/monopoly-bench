@@ -63,7 +63,7 @@ export class RunDO extends DurableObject<WorkerEnv> {
     return this.coordinator.charge(gameId, key, costUsd);
   }
 
-  credentials(): ModelCredentials {
+  credentials(): ModelCredentials | null {
     return this.coordinator.credentials();
   }
 

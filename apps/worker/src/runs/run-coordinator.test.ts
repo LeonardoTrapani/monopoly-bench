@@ -310,10 +310,17 @@ describe("RunCoordinator", () => {
 
     await coordinator.cancel();
 
-    // Cancelled: the key is gone (wakes still in flight fail instead of using the server key).
-    expect(coordinator.credentials()).toEqual({ funding: "ownKey", openRouterKey: null });
+    // Cancelled: no key for any later wake (it fails fast instead of using the server's key).
+    expect(coordinator.credentials()).toBeNull();
     expect(coordinator.cancelTokenMatches("ab12")).toBe(true);
+
+    // A server-funded run: the server's key while active, nothing for an unknown run.
+    expect(h.coordinator.credentials()).toBeNull();
+
+    await h.coordinator.create("r2", config({ seeds: 1 }), [], null);
+
     expect(h.coordinator.credentials()).toEqual({ funding: "server", openRouterKey: null });
+    expect(h.coordinator.cancelTokenMatches("ab12")).toBe(false);
   });
 
   it("deletes the own key when the run finishes", async () => {
@@ -324,7 +331,7 @@ describe("RunCoordinator", () => {
     for (const start of h.started.slice()) await h.coordinator.gameFinished(h.finish(start));
 
     expect(h.coordinator.summary()?.status).toBe("finished");
-    expect(h.coordinator.credentials().openRouterKey).toBeNull();
+    expect(h.coordinator.credentials()).toBeNull();
     expect(JSON.stringify(h.sql.exec("SELECT * FROM funding"))).not.toContain("sk-or-own-key");
   });
 
@@ -336,7 +343,7 @@ describe("RunCoordinator", () => {
 
     expect(h.purged).toEqual(["r1-0-0:AB", "r1-0-1:AB"]);
     expect(h.coordinator.summary()).toBeNull();
-    expect(h.coordinator.credentials()).toEqual({ funding: "server", openRouterKey: null });
+    expect(h.coordinator.credentials()).toBeNull();
 
     for (const table of ["run", "games", "charges", "funding"]) {
       expect(h.sql.exec(`SELECT * FROM ${table}`)).toEqual([]);

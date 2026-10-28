@@ -71,7 +71,9 @@ POST /api/runs ──▶ RunDO (one per run)          src/runs/run-coordinator.t
   `limit_remaining < budgetUsd` → 400), then handed to RunDO, which keeps it in its SQLite
   `funding` table and stores only the SHA-256 of the run's cancel token. Before every wake
   PlayerDO asks RunDO `credentials()` and calls OpenRouter with that key (memory only, for
-  that wake); an own-key run never falls back to the server's key. The key is deleted when the
+  that wake); an own-key run never falls back to the server's key, and a run that is no longer
+  active (ended, cancelled, deleted) gives no key at all, so a stray wake fails fast. The key
+  is deleted when the
   run finishes, is cancelled or is deleted, and scrubbed (`[redacted key]`) from anything a
   provider error could carry into transcripts, conversation rows or logs. `src/own-key.test.ts`
   plays a whole run on fakes and scans D1, R2, every object's storage, API responses,
