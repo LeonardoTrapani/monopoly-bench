@@ -73,8 +73,11 @@ export const planSeats = (specs: ReadonlyArray<SeatSpec>): ReadonlyArray<Planned
         ];
   });
 
+/** The start of every game id of a run. */
+export const gameIdPrefixOf = (runId: string): string => `${runId}-`;
+
 export const gameIdOf = (runId: string, seedIndex: number, rotation: number): string =>
-  `${runId}-${seedIndex}-${rotation}`;
+  `${gameIdPrefixOf(runId)}${seedIndex}-${rotation}`;
 
 export const expandRun = (runId: string, config: RunConfig): ReadonlyArray<PlannedGame> => {
   const n = config.players.length;

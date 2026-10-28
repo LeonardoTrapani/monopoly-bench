@@ -1,20 +1,21 @@
-import { BotSeat, LlmSeat, type RunConfig } from "@mb/api";
+import { LlmSeat, type RunConfig } from "@mb/api";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { GameOutcome, GameStart } from "../contracts.ts";
+import type { GameOutcome, GameStart, OwnKeyFunding } from "../contracts.ts";
 import type { GameRatingInput } from "../db/ratings-store.ts";
 import { memorySqlPort } from "../testing/sqlite.ts";
 import { RunCoordinator } from "./run-coordinator.ts";
 
 const opus = LlmSeat.make({ model: "anthropic/claude-opus-5.5", label: "Opus" });
 
-const random = BotSeat.make({ policy: "random" });
+const sol = LlmSeat.make({ model: "openai/gpt-6.1-sol", label: "Sol" });
 
-const heuristic = BotSeat.make({ policy: "heuristic" });
+const ownKey: OwnKeyFunding = { openRouterKey: "sk-or-own-key", cancelTokenSha256: "ab12" };
 
 const setup = () => {
   const started: Array<GameStart> = [];
   const aborted: Array<string> = [];
+  const purged: Array<string> = [];
   const abortedQueued: Array<string> = [];
   const rated: Array<GameRatingInput> = [];
   const runUpdates: Array<string> = [];
@@ -22,8 +23,10 @@ const setup = () => {
   let failStarts = 0;
   let failRatings = 0;
 
+  const sql = memorySqlPort();
+
   const coordinator = new RunCoordinator({
-    sql: memorySqlPort(),
+    sql,
     db: {
       insertRun: async () => {},
       updateRun: async (_id, status, spent) => {
@@ -53,6 +56,9 @@ const setup = () => {
       abort: async (gameId) => {
         aborted.push(gameId);
       },
+      purge: async (gameId, llmSeats) => {
+        purged.push(`${gameId}:${llmSeats.join("")}`);
+      },
     },
     setAlarm: async (at) => {
       alarms.push(at);
@@ -77,8 +83,10 @@ const setup = () => {
 
   return {
     coordinator,
+    sql,
     started,
     aborted,
+    purged,
     abortedQueued,
     rated,
     runUpdates,
@@ -94,7 +102,7 @@ const setup = () => {
 };
 
 const config = (patch: Partial<RunConfig> = {}): RunConfig => ({
-  players: [opus, random],
+  players: [opus, sol],
   seeds: 3,
   budgetUsd: 1,
   concurrency: 2,
@@ -112,16 +120,23 @@ describe("RunCoordinator", () => {
         { id: "anthropic/claude-opus-5.5", pricing: { prompt: "0.000004", completion: "0.00002" } },
         { id: "unused/model" },
       ],
+      null,
     );
 
-    expect(summary).toMatchObject({ id: "r1", status: "running", gamesTotal: 6, gamesRunning: 2 });
+    expect(summary).toMatchObject({
+      id: "r1",
+      funding: "server",
+      status: "running",
+      gamesTotal: 6,
+      gamesRunning: 2,
+    });
     expect(h.started.map((start) => start.gameId)).toEqual(["r1-0-0", "r1-0-1"]);
     expect(h.started[0]).toMatchObject({
       config: { gameId: "r1-0-0", rules: { maxRounds: 7, tableFrequency: "everyRound" } },
       budgetExhausted: false,
     });
     expect(h.started[1]?.config.seats.map((seat) => seat.competitorId)).toEqual([
-      "bot:random",
+      "openai/gpt-6.1-sol",
       "anthropic/claude-opus-5.5",
     ]);
     expect(h.started[0]?.listings.map((listing) => listing.id)).toEqual([
@@ -143,8 +158,8 @@ describe("RunCoordinator", () => {
   it("is idempotent on create", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config(), []);
-    const again = await h.coordinator.create("r1", config({ seeds: 9 }), []);
+    await h.coordinator.create("r1", config(), [], null);
+    const again = await h.coordinator.create("r1", config({ seeds: 9 }), [], null);
 
     expect(again?.gamesTotal).toBe(6);
     expect(h.started).toHaveLength(2);
@@ -153,7 +168,7 @@ describe("RunCoordinator", () => {
   it("finishes the run after the last game and does not rate aborted games", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config({ seeds: 1, concurrency: 4 }), []);
+    await h.coordinator.create("r1", config({ seeds: 1, concurrency: 4 }), [], null);
 
     for (const start of h.started.slice())
       await h.coordinator.gameFinished(h.finish(start, "aborted"));
@@ -166,7 +181,7 @@ describe("RunCoordinator", () => {
   it("charges each wake once and stops LLM games when the budget is reached", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config({ budgetUsd: 1 }), []);
+    await h.coordinator.create("r1", config({ budgetUsd: 1 }), [], null);
 
     expect(await h.coordinator.charge("r1-0-0", "k1", 0.6)).toEqual({ exhausted: false });
     expect(await h.coordinator.charge("r1-0-0", "k1", 0.6)).toEqual({ exhausted: false });
@@ -188,31 +203,10 @@ describe("RunCoordinator", () => {
     expect(h.abortedQueued).toEqual(["r1-1-0", "r1-1-1", "r1-2-0", "r1-2-1"]);
   });
 
-  it("keeps running bot-only games when the budget is spent", async () => {
-    const h = setup();
-
-    await h.coordinator.create(
-      "r1",
-      config({ players: [random, heuristic], budgetUsd: 0, seeds: 2 }),
-      [],
-    );
-
-    expect(h.started).toHaveLength(2);
-
-    for (let index = 0; index < h.started.length; index += 1) {
-      const start = h.started[index];
-
-      if (start !== undefined) await h.coordinator.gameFinished(h.finish(start));
-    }
-
-    expect(h.started).toHaveLength(4);
-    expect(h.coordinator.summary()?.status).toBe("finished");
-  });
-
   it("cancels: queued games never start and running games are aborted", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config(), []);
+    await h.coordinator.create("r1", config(), [], null);
 
     const summary = await h.coordinator.cancel();
 
@@ -234,7 +228,7 @@ describe("RunCoordinator", () => {
     const h = setup();
     h.failNextStarts(1);
 
-    await h.coordinator.create("r1", config(), []);
+    await h.coordinator.create("r1", config(), [], null);
 
     expect(h.started.map((start) => start.gameId)).toEqual(["r1-0-1"]);
 
@@ -246,7 +240,7 @@ describe("RunCoordinator", () => {
   it("keeps retrying a failed rating after the run finished (F3)", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config({ seeds: 1 }), []);
+    await h.coordinator.create("r1", config({ seeds: 1 }), [], null);
     h.failNextRatings(1);
 
     for (const start of h.started.slice()) await h.coordinator.gameFinished(h.finish(start));
@@ -264,7 +258,7 @@ describe("RunCoordinator", () => {
   it("keeps retrying a failed rating after the run was cancelled (F3)", async () => {
     const h = setup();
 
-    await h.coordinator.create("r1", config({ seeds: 1 }), []);
+    await h.coordinator.create("r1", config({ seeds: 1 }), [], null);
     h.failNextRatings(1);
 
     const first = h.started[0];
@@ -280,5 +274,79 @@ describe("RunCoordinator", () => {
     await h.coordinator.alarm();
 
     expect(h.rated.map((input) => input.gameId)).toEqual(["r1-0-0"]);
+  });
+
+  it("keeps an own key only while the run is active and never in D1", async () => {
+    const h = setup();
+    const inserted: Array<string> = [];
+
+    const coordinator = new RunCoordinator({
+      sql: memorySqlPort(),
+      db: {
+        insertRun: async (run) => {
+          inserted.push(JSON.stringify(run));
+        },
+        updateRun: async () => {},
+        abortQueued: async () => {},
+        applyRatings: async () => {},
+      },
+      games: { start: async () => {}, abort: async () => {}, purge: async () => {} },
+      setAlarm: async () => {},
+      now: () => 0,
+      log: () => {},
+    });
+
+    const summary = await coordinator.create("r1", config({ seeds: 1 }), [], ownKey);
+
+    expect(summary.funding).toBe("ownKey");
+    expect(inserted.join("")).toContain('"funding":"ownKey"');
+    expect(inserted.join("")).not.toContain(ownKey.openRouterKey);
+    expect(coordinator.credentials()).toEqual({
+      funding: "ownKey",
+      openRouterKey: "sk-or-own-key",
+    });
+    expect(coordinator.cancelTokenMatches("ab12")).toBe(true);
+    expect(coordinator.cancelTokenMatches("ab13")).toBe(false);
+
+    await coordinator.cancel();
+
+    // Cancelled: the key is gone (wakes still in flight fail instead of using the server key).
+    expect(coordinator.credentials()).toEqual({ funding: "ownKey", openRouterKey: null });
+    expect(coordinator.cancelTokenMatches("ab12")).toBe(true);
+    expect(h.coordinator.credentials()).toEqual({ funding: "server", openRouterKey: null });
+  });
+
+  it("deletes the own key when the run finishes", async () => {
+    const h = setup();
+
+    await h.coordinator.create("r1", config({ seeds: 1 }), [], ownKey);
+
+    for (const start of h.started.slice()) await h.coordinator.gameFinished(h.finish(start));
+
+    expect(h.coordinator.summary()?.status).toBe("finished");
+    expect(h.coordinator.credentials().openRouterKey).toBeNull();
+    expect(JSON.stringify(h.sql.exec("SELECT * FROM funding"))).not.toContain("sk-or-own-key");
+  });
+
+  it("purges a deleted run: started games and their LLM seats, then its own storage", async () => {
+    const h = setup();
+
+    await h.coordinator.create("r1", config(), [], ownKey);
+    await h.coordinator.purge();
+
+    expect(h.purged).toEqual(["r1-0-0:AB", "r1-0-1:AB"]);
+    expect(h.coordinator.summary()).toBeNull();
+    expect(h.coordinator.credentials()).toEqual({ funding: "server", openRouterKey: null });
+
+    for (const table of ["run", "games", "charges", "funding"]) {
+      expect(h.sql.exec(`SELECT * FROM ${table}`)).toEqual([]);
+    }
+
+    expect(h.alarms.at(-1)).toBeNull();
+
+    // Idempotent: nothing left to purge.
+    await h.coordinator.purge();
+
+    expect(h.purged).toHaveLength(2);
   });
 });

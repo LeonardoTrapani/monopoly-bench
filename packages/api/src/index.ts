@@ -427,6 +427,7 @@ export const seatCostModel = {
 export const estimateSeatCostUsd = (pricing: ModelPricing): number => {
   const cached = pricing.cacheReadPerMTok ?? pricing.inputPerMTok;
   const fresh = pricing.cacheWritePerMTok ?? pricing.inputPerMTok;
+
   const perWake =
     seatCostModel.cachedTokensPerWake * cached +
     seatCostModel.freshTokensPerWake * fresh +

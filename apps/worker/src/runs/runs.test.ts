@@ -1,4 +1,4 @@
-import { BotSeat, LlmSeat, type RunConfig, type SeatSpec } from "@mb/api";
+import { LlmSeat, type RunConfig } from "@mb/api";
 import { describe, expect, it } from "vite-plus/test";
 
 import { charge, isExhausted, mayRun } from "./budget.ts";
@@ -6,10 +6,10 @@ import { deriveGameSeed, expandRun, newRunId, rotateSeats } from "./expand.ts";
 
 const opus = LlmSeat.make({ model: "anthropic/claude-opus-5.5", label: "Opus" });
 const sol = LlmSeat.make({ model: "openai/gpt-6.1-sol", label: "Sol", reasoning: "high" });
-const heuristic = BotSeat.make({ policy: "heuristic" });
-const random = BotSeat.make({ policy: "random" });
+const haiku = LlmSeat.make({ model: "anthropic/claude-haiku-5.5", label: "Haiku" });
+const grok = LlmSeat.make({ model: "x-ai/grok-4.7", label: "Grok", reasoning: "low" });
 
-const config = (players: ReadonlyArray<SeatSpec>, seeds: number): RunConfig => ({
+const config = (players: RunConfig["players"], seeds: number): RunConfig => ({
   players,
   seeds,
   budgetUsd: 5,
@@ -23,7 +23,7 @@ describe("run expansion", () => {
   });
 
   it("plays seeds × players games, every competitor in every seat once per seed", () => {
-    const players = [opus, sol, heuristic, random];
+    const players = [opus, sol, haiku, grok];
     const games = expandRun("r-1", config(players, 3));
 
     expect(games).toHaveLength(12);
@@ -46,15 +46,15 @@ describe("run expansion", () => {
 
     expect(games[1]?.seats.map((seat) => seat.competitorId)).toEqual([
       "openai/gpt-6.1-sol:high",
-      "bot:heuristic",
-      "bot:random",
+      "anthropic/claude-haiku-5.5",
+      "x-ai/grok-4.7:low",
       "anthropic/claude-opus-5.5",
     ]);
   });
 
   it("derives game seeds deterministically, shared across runs", () => {
-    const first = expandRun("r-a", config([opus, heuristic], 2));
-    const second = expandRun("r-b", config([opus, heuristic], 2));
+    const first = expandRun("r-a", config([opus, haiku], 2));
+    const second = expandRun("r-b", config([opus, haiku], 2));
 
     expect(first.map((game) => game.seed)).toEqual(second.map((game) => game.seed));
     expect(deriveGameSeed(0)).not.toBe(deriveGameSeed(1));
@@ -63,8 +63,7 @@ describe("run expansion", () => {
   });
 
   it("marks games that need LLM wakes", () => {
-    expect(expandRun("r", config([heuristic, random], 1)).every((game) => !game.hasLlm)).toBe(true);
-    expect(expandRun("r", config([opus, random], 1)).every((game) => game.hasLlm)).toBe(true);
+    expect(expandRun("r", config([opus, haiku], 1)).every((game) => game.hasLlm)).toBe(true);
   });
 
   it("creates sortable, URL-safe run ids", () => {

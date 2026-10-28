@@ -4,7 +4,15 @@
  * Public HTTP shapes live in `@mb/api`.
  */
 import { TOOL_NAMES } from "@mb/agent";
-import { LlmSeat, PlayersCount, Seat, SeatSpec, SpectatorMessage, WakeTranscript } from "@mb/api";
+import {
+  LlmSeat,
+  PlayersCount,
+  type RunFunding,
+  Seat,
+  SeatSpec,
+  SpectatorMessage,
+  WakeTranscript,
+} from "@mb/api";
 import { GameConfig } from "@mb/engine";
 import { Schema } from "effect";
 
@@ -72,8 +80,6 @@ export const WakeRequest = Schema.Struct({
   runId: Schema.String,
   seat: Seat,
   decisionId: Schema.String,
-  /** Rounds of one session share it: the conversation continues. A new key resets it. */
-  sessionKey: Schema.String,
   turn: Schema.Int,
   frame: Schema.String,
   round: Schema.Int,
@@ -119,6 +125,8 @@ export const WakeReport = Schema.Struct({
   transcript: WakeTranscript,
   latencyMs: Schema.Number,
   endReason: Schema.String,
+  /** Conversation compactions before the wake's first request (SPEC §6.2); 0 or 1. */
+  compactions: Schema.Int,
 });
 
 export type WakeReport = typeof WakeReport.Type;
@@ -147,6 +155,24 @@ export type GameOutcome = typeof GameOutcome.Type;
 export const ChargeResult = Schema.Struct({ exhausted: Schema.Boolean });
 
 export type ChargeResult = typeof ChargeResult.Type;
+
+/**
+ * API → RunDO for a run paid with the creator's OpenRouter key (SPEC §7.2). RunDO keeps the key
+ * in its own SQLite only while the run is active and stores only the cancel token's SHA-256.
+ */
+export interface OwnKeyFunding {
+  readonly openRouterKey: string;
+  readonly cancelTokenSha256: string;
+}
+
+/**
+ * RunDO → PlayerDO before every wake: who pays. `openRouterKey` is the run's own key (null for a
+ * server-funded run, or once an own-key run ended and its key was deleted).
+ */
+export interface ModelCredentials {
+  readonly funding: RunFunding;
+  readonly openRouterKey: string | null;
+}
 
 /**
  * Server → client messages of the spectator WebSocket (`GET /api/games/:id/ws`). `Hello` is

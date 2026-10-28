@@ -1,4 +1,4 @@
-import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { calculateCost, createModels } from "@earendil-works/pi-ai/models";
 import {
   fauxAssistantMessage,
@@ -19,6 +19,7 @@ import {
   type ToolOutcome,
   type WakeLimits,
 } from "./executor.ts";
+import { DEFAULT_MEMORY_LIMITS, EMPTY_CONVERSATION } from "./memory.ts";
 import { runWake, type WakeInput } from "./run-wake.ts";
 import type { ToolName } from "./tools.ts";
 
@@ -104,10 +105,11 @@ const harness = (responses: ReadonlyArray<FauxResponseStep>, tokensPerSecond = 0
       reasoning: "medium",
       maxOutputTokens: undefined,
       systemPrompt: "You play Monopoly.",
-      history: [],
+      conversation: EMPTY_CONVERSATION,
       message: "Your turn.",
       executor: scriptedHost(calls),
       limits: DEFAULT_WAKE_LIMITS,
+      memory: DEFAULT_MEMORY_LIMITS,
       onActivity: (event) => {
         activity.push(event);
       },
@@ -369,7 +371,7 @@ describe("runWake", () => {
     expect(streamed.join("")).toBe("Orange set is hot.Now finish.");
   });
 
-  it("continues the session conversation when given history", async () => {
+  it("continues the conversation it is given", async () => {
     const seen: Array<number> = [];
 
     const respond =
@@ -385,13 +387,15 @@ describe("runWake", () => {
     const h = harness([respond("first"), respond("second")]);
 
     const first = await runWake(h.input({}));
-    const history: ReadonlyArray<AgentMessage> = first.messages;
-    const second = await runWake(h.input({ history, message: "Round 2." }));
+
+    const second = await runWake(
+      h.input({ conversation: first.conversation, message: "Round 2." }),
+    );
 
     expect(second.answered).toBe(true);
     expect(seen[1]).toBeGreaterThan(seen[0] ?? 0);
-    expect(second.messages.length).toBeGreaterThan(first.messages.length);
-    expect(second.messages[0]).toEqual(first.messages[0]);
+    expect(second.conversation.messages.length).toBeGreaterThan(first.conversation.messages.length);
+    expect(second.conversation.messages[0]).toEqual(first.conversation.messages[0]);
   });
 
   it("passes maxOutputTokens and the api key to the stream", async () => {

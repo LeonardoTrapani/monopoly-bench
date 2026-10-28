@@ -25,8 +25,6 @@ export interface PendingDecision {
   readonly round: number;
   /** Wake reasons (SPEC §5.3): "opening", "addressed", "inThread", "follows", … */
   readonly reasons: ReadonlyArray<string>;
-  /** Shared by the rounds of one session; the agent conversation continues while it is equal. */
-  readonly sessionKey: string;
 }
 
 export interface Pending {

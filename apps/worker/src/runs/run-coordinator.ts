@@ -1,16 +1,22 @@
 /**
  * RunDO logic (SPEC.md §7.1, §8): expands a run into games, starts up to `concurrency` GameDOs,
  * starts the next one when a game finishes, keeps the budget (charges are idempotent per
- * wake), updates ratings when a game finishes, and cancels.
+ * wake), updates ratings when a game finishes, cancels, and purges a deleted run.
+ *
+ * An own-key run keeps the creator's OpenRouter key in this object's SQLite only (the `funding`
+ * table; never in D1, archives or other objects): PlayerDOs read it per wake through
+ * `credentials()`, and it is deleted as soon as the run finishes, is cancelled or is purged.
  */
-import { RunConfig, type RunStatus, type RunSummary } from "@mb/api";
+import { RunConfig, RunFunding, type RunStatus, type RunSummary, type Seat } from "@mb/api";
 import { Match, Schema } from "effect";
 
 import {
   type ChargeResult,
   GameOutcome,
   type GameStart,
+  type ModelCredentials,
   ModelListing,
+  type OwnKeyFunding,
   PlannedSeat,
 } from "../contracts.ts";
 import type { GameRatingInput } from "../db/ratings-store.ts";
@@ -40,6 +46,8 @@ export interface RunDbPort {
 export interface GamesLinkPort {
   readonly start: (start: GameStart) => Promise<void>;
   readonly abort: (gameId: string, reason: string) => Promise<void>;
+  /** Wipe a started game's GameDO and the PlayerDOs of its LLM seats; they stop for good. */
+  readonly purge: (gameId: string, llmSeats: ReadonlyArray<Seat>) => Promise<void>;
 }
 
 export interface RunPorts {
@@ -62,6 +70,10 @@ CREATE TABLE IF NOT EXISTS games (
   has_llm INTEGER NOT NULL, plan_json TEXT NOT NULL, outcome_json TEXT, rated INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS charges (key TEXT PRIMARY KEY, game_id TEXT NOT NULL, cost_usd REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS funding (
+  id INTEGER PRIMARY KEY CHECK (id = 1), funding TEXT NOT NULL,
+  cancel_token_sha256 TEXT, openrouter_key TEXT
+);
 `;
 
 const PlannedGameSchema = Schema.Struct({
@@ -95,6 +107,14 @@ const GameRow = Schema.Struct({
 
 const OutcomeRow = Schema.Struct({ outcome_json: Schema.String });
 
+const FundingRow = Schema.Struct({
+  funding: RunFunding,
+  cancel_token_sha256: Schema.NullOr(Schema.String),
+  openrouter_key: Schema.NullOr(Schema.String),
+});
+
+const PlanRow = Schema.Struct({ plan_json: Schema.String });
+
 const CountRow = Schema.Struct({ n: Schema.Int });
 
 const decodeConfig = jsonColumn(RunConfig);
@@ -118,18 +138,29 @@ export class RunCoordinator {
     ports.sql.exec(SCHEMA);
   }
 
-  /** API → RunDO. Idempotent: creating an existing run returns its summary. */
+  /**
+   * API → RunDO. `ownKey` is null for a server-funded run. Idempotent: creating an existing run
+   * returns its summary.
+   */
   async create(
     runId: string,
     config: RunConfig,
     listings: ReadonlyArray<ModelListing>,
+    ownKey: OwnKeyFunding | null,
   ): Promise<RunSummary> {
     if (this.run() === undefined) {
       const createdAt = this.iso();
       const games = expandRun(runId, config);
+      const funding: RunFunding = ownKey === null ? "server" : "ownKey";
 
-      await this.ports.db.insertRun({ id: runId, createdAt, config, games });
+      await this.ports.db.insertRun({ id: runId, createdAt, funding, config, games });
       this.ports.sql.transaction(() => {
+        this.ports.sql.exec(
+          "INSERT INTO funding (id, funding, cancel_token_sha256, openrouter_key) VALUES (1, ?, ?, ?)",
+          funding,
+          ownKey?.cancelTokenSha256 ?? null,
+          ownKey?.openRouterKey ?? null,
+        );
         this.ports.sql.exec(
           "INSERT INTO run (id, run_id, created_at, status, config_json, listings_json, spent_usd) VALUES (1, ?, ?, 'running', ?, ?, 0)",
           runId,
@@ -224,6 +255,23 @@ export class RunCoordinator {
     return { exhausted: isExhausted(outcome.budget) };
   }
 
+  /** PlayerDO → RunDO before every wake: who pays for it (SPEC §7.2). */
+  credentials(): ModelCredentials {
+    const funding = this.funding();
+
+    return {
+      funding: funding?.funding ?? "server",
+      openRouterKey: funding?.funding === "ownKey" ? funding.openrouter_key : null,
+    };
+  }
+
+  /** API → RunDO: whether `tokenSha256` is this own-key run's cancel token. */
+  cancelTokenMatches(tokenSha256: string): boolean {
+    const stored = this.funding()?.cancel_token_sha256 ?? null;
+
+    return stored !== null && stored === tokenSha256;
+  }
+
   /** API → RunDO. Stops queued games and aborts running ones. */
   async cancel(): Promise<RunSummary | null> {
     const run = this.run();
@@ -235,10 +283,7 @@ export class RunCoordinator {
       const running = this.games("running").map((game) => game.game_id);
 
       this.ports.sql.transaction(() => {
-        this.ports.sql.exec(
-          "UPDATE run SET status = 'cancelled', finished_at = ? WHERE id = 1",
-          this.iso(),
-        );
+        this.close("cancelled");
         this.ports.sql.exec("UPDATE games SET status = 'skipped' WHERE status = 'queued'");
       });
       await this.ports.db.abortQueued(queued, this.iso());
@@ -253,6 +298,39 @@ export class RunCoordinator {
     }
 
     return this.summary();
+  }
+
+  /**
+   * API → RunDO when the run is deleted: closes the run, wipes the GameDO and PlayerDOs of every
+   * started game, then this object's own storage. Idempotent; a failure leaves this object's
+   * storage in place, so retrying the deletion purges what is left.
+   */
+  async purge(): Promise<void> {
+    if (this.run() === undefined) return;
+
+    this.ports.sql.transaction(() => {
+      this.close("cancelled");
+      this.ports.sql.exec("UPDATE games SET status = 'skipped' WHERE status = 'queued'");
+    });
+
+    const started = queryRows(
+      this.ports.sql,
+      PlanRow,
+      "SELECT plan_json FROM games WHERE status IN ('running', 'done') ORDER BY game_index",
+    ).map((row) => decodePlan(row.plan_json));
+
+    for (const game of started) {
+      const llmSeats = game.seats.flatMap((seat) => (seat.kind === "llm" ? [seat.seat] : []));
+
+      await this.ports.games.purge(game.gameId, llmSeats);
+    }
+
+    this.ports.sql.transaction(() => {
+      for (const table of ["run", "games", "charges", "funding"]) {
+        this.ports.sql.exec(`DELETE FROM ${table}`);
+      }
+    });
+    await this.ports.setAlarm(null);
   }
 
   async alarm(): Promise<void> {
@@ -274,6 +352,7 @@ export class RunCoordinator {
 
     return {
       id: run.run_id,
+      funding: this.funding()?.funding ?? "server",
       name: config.name ?? null,
       createdAt: run.created_at,
       status: run.status,
@@ -337,10 +416,7 @@ export class RunCoordinator {
     const open = this.games("queued").length + this.games("running").length;
 
     if (open === 0) {
-      this.ports.sql.exec(
-        "UPDATE run SET status = 'finished', finished_at = ? WHERE id = 1",
-        this.iso(),
-      );
+      this.ports.sql.transaction(() => this.close("finished"));
       await this.syncD1();
       await this.settleAlarm();
 
@@ -410,6 +486,27 @@ export class RunCoordinator {
     } catch (cause) {
       this.ports.log(`D1 updateRun failed for ${run.run_id}`, cause);
     }
+  }
+
+  /**
+   * Ends the run (call inside a transaction): its status, and the deletion of an own key, which
+   * must not outlive the run (SPEC §7.2).
+   */
+  private close(status: "finished" | "cancelled"): void {
+    this.ports.sql.exec(
+      "UPDATE run SET status = ?, finished_at = ? WHERE id = 1",
+      status,
+      this.iso(),
+    );
+    this.ports.sql.exec("UPDATE funding SET openrouter_key = NULL");
+  }
+
+  private funding() {
+    return queryFirst(
+      this.ports.sql,
+      FundingRow,
+      "SELECT funding, cancel_token_sha256, openrouter_key FROM funding WHERE id = 1",
+    );
   }
 
   private run(): RunRow | undefined {

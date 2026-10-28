@@ -4,8 +4,10 @@
  * stream function and the `ToolExecutor` (GameDO RPC in PlayerDO, the engine in-process in a
  * local simulation).
  *
- * Within one session the host passes the previous `messages` back as `history` and the
- * conversation continues; for a new decision it passes no history and the context resets.
+ * Each seat keeps one conversation for the whole game (SPEC §6.2): the host passes the
+ * previous `WakeResult.conversation` back and the wake message is appended as a new user turn.
+ * Before the first request, a conversation over the fixed memory budget is compacted (the same
+ * model summarizes the older part); the summary's usage and cost count in the wake's usage.
  */
 import {
   Agent,
@@ -31,6 +33,13 @@ import {
 } from "@mb/api";
 
 import type { ToolExecutor, WakeLimits } from "./executor.ts";
+import {
+  type Compaction,
+  compactConversation,
+  type Conversation,
+  type MemoryLimits,
+  needsCompaction,
+} from "./memory.ts";
 import { thinkingLevel } from "./models.ts";
 import {
   TOOL_NAMES,
@@ -39,6 +48,7 @@ import {
   type ToolName,
   type ToolParameters,
 } from "./tools.ts";
+import { addResponseUsage, EMPTY_USAGE, sumUsage } from "./usage.ts";
 import { NUDGE_MESSAGE } from "./wake-message.ts";
 
 export interface WakeIdentity {
@@ -59,11 +69,13 @@ export interface WakeInput {
   readonly reasoning: Reasoning | undefined;
   readonly maxOutputTokens: number | undefined;
   readonly systemPrompt: string;
-  /** Messages of the current session (from an earlier `WakeResult.messages`). */
-  readonly history: ReadonlyArray<AgentMessage>;
+  /** The seat's conversation so far (an earlier `WakeResult.conversation`; empty at first). */
+  readonly conversation: Conversation;
   readonly message: string;
   readonly executor: ToolExecutor;
   readonly limits: WakeLimits;
+  /** When the conversation is compacted (`DEFAULT_MEMORY_LIMITS` outside tests). */
+  readonly memory: MemoryLimits;
   readonly onActivity: (activity: SeatActivity) => void | Promise<void>;
   /** Provider session id for prompt caching, e.g. `${gameId}:${seat}`. */
   readonly sessionId: string | undefined;
@@ -94,23 +106,15 @@ export interface WakeResult {
   readonly usage: WakeUsage;
   readonly latencyMs: number;
   readonly errorMessage: string | null;
-  /** The whole session transcript, to pass back as `history` for the next round. */
-  readonly messages: ReadonlyArray<AgentMessage>;
+  /** The seat's conversation after this wake, to pass back at its next wake. */
+  readonly conversation: Conversation;
+  /** The compaction attempted before this wake's first request, if any (its usage is in `usage`). */
+  readonly compaction: Omit<Compaction, "conversation"> | null;
 }
 
 const REASONING_FLUSH_CHARS = 400;
 
 const REASONING_FLUSH_MS = 500;
-
-const emptyUsage: WakeUsage = { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, costUsd: 0 };
-
-const addUsage = (total: WakeUsage, message: AssistantMessage): WakeUsage => ({
-  inputTokens:
-    total.inputTokens + message.usage.input + message.usage.cacheRead + message.usage.cacheWrite,
-  outputTokens: total.outputTokens + message.usage.output,
-  reasoningTokens: total.reasoningTokens + (message.usage.reasoning ?? 0),
-  costUsd: total.costUsd + message.usage.cost.total,
-});
 
 const contentText = (content: ReadonlyArray<TextContent | ImageContent>): string =>
   content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
@@ -124,7 +128,7 @@ class WakeLedger {
   timedOut = false;
   toolCallsStarted = 0;
   invalidActions = 0;
-  usage = emptyUsage;
+  usage: WakeUsage = EMPTY_USAGE;
   reasoning: Array<string> = [];
   text: Array<string> = [];
   toolCalls: Array<ToolCallRecord> = [];
@@ -278,7 +282,7 @@ const recordToolEnd = async (
 };
 
 const recordAssistant = (message: AssistantMessage, ledger: WakeLedger): void => {
-  ledger.usage = addUsage(ledger.usage, message);
+  ledger.usage = addResponseUsage(ledger.usage, message);
   ledger.lastAssistant = message;
 
   for (const block of message.content) {
@@ -305,29 +309,28 @@ const endReasonOf = (ledger: WakeLedger, externallyAborted: boolean): WakeEndRea
   return ledger.lastAssistant?.stopReason === "error" ? "modelError" : "unanswered";
 };
 
-export const runWake = async (input: WakeInput): Promise<WakeResult> => {
-  const startedAt = input.now();
-  const ledger = new WakeLedger(input.limits);
-  const reasoningStream = new ReasoningStream(input, startedAt);
+/** Runs the wake's own agent over the (compacted) conversation; returns the conversation after it. */
+const play = async (
+  input: WakeInput,
+  conversation: Conversation,
+  ledger: WakeLedger,
+  reasoningStream: ReasoningStream,
+  signal: AbortSignal,
+): Promise<Conversation> => {
   const argsByCall = new Map<string, string>();
   const tools = TOOL_NAMES.map((name) => makeTool(name, input, ledger));
   const maxTokens = input.maxOutputTokens;
 
+  // The system message (prompt and tool declarations) is added only to a new conversation; a
+  // continuing one already starts with it, so every request extends the previous one.
   const agent = new Agent({
-    initialState:
-      input.history.length === 0
-        ? {
-            systemPrompt: input.systemPrompt,
-            model: input.model,
-            thinkingLevel: thinkingLevel(input.reasoning),
-            tools,
-          }
-        : {
-            model: input.model,
-            thinkingLevel: thinkingLevel(input.reasoning),
-            tools,
-            messages: [...input.history],
-          },
+    initialState: {
+      systemPrompt: input.systemPrompt,
+      model: input.model,
+      thinkingLevel: thinkingLevel(input.reasoning),
+      tools,
+      messages: [...conversation.messages],
+    },
     streamFn:
       maxTokens === undefined
         ? input.streamFn
@@ -381,6 +384,45 @@ export const runWake = async (input: WakeInput): Promise<WakeResult> => {
     }
   });
 
+  const abort = () => agent.abort();
+
+  signal.addEventListener("abort", abort, { once: true });
+
+  // The wake message becomes the next user turn.
+  const wakeStart = agent.state.messages.length;
+
+  try {
+    await agent.prompt(input.message);
+
+    // The model stopped without answering: count it as an invalid action and ask again,
+    // within the limits, in the same conversation.
+    while (
+      !ledger.answered &&
+      !ledger.closed &&
+      !ledger.timedOut &&
+      !signal.aborted &&
+      ledger.lastAssistant?.stopReason !== "error" &&
+      ledger.lastAssistant?.stopReason !== "aborted" &&
+      ledger.limitReached() === undefined
+    ) {
+      ledger.invalidActions += 1;
+
+      if (ledger.limitReached() !== undefined) break;
+
+      await agent.prompt(NUDGE_MESSAGE);
+    }
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+
+  return { messages: agent.state.messages, wakeStarts: [...conversation.wakeStarts, wakeStart] };
+};
+
+export const runWake = async (input: WakeInput): Promise<WakeResult> => {
+  const startedAt = input.now();
+  const ledger = new WakeLedger(input.limits);
+  const reasoningStream = new ReasoningStream(input, startedAt);
+
   await input.onActivity(
     SeatActivity.cases.WakeStarted.make({
       seat: input.identity.seat,
@@ -392,33 +434,30 @@ export const runWake = async (input: WakeInput): Promise<WakeResult> => {
     }),
   );
 
+  // Fires at the wake timeout or on the host's signal; stops the compaction and the agent.
+  const stop = new AbortController();
+
   const timer = setTimeout(() => {
     ledger.timedOut = true;
-    agent.abort();
+    stop.abort();
   }, input.limits.wakeTimeoutMs);
 
-  const abortFromOutside = () => agent.abort();
+  const abortFromOutside = () => stop.abort();
+
   input.signal?.addEventListener("abort", abortFromOutside, { once: true });
 
+  let conversation = input.conversation;
+  let compaction: Compaction | null = null;
+
   try {
-    await agent.prompt(input.message);
+    if (needsCompaction(input, conversation, input.message)) {
+      compaction = await compactConversation(input, conversation, stop.signal);
+      conversation = compaction.conversation;
+      ledger.usage = sumUsage(ledger.usage, compaction.usage);
+    }
 
-    // The model stopped without answering: count it as an invalid action and ask again,
-    // within the limits, in the same conversation.
-    while (
-      !ledger.answered &&
-      !ledger.closed &&
-      !ledger.timedOut &&
-      input.signal?.aborted !== true &&
-      ledger.lastAssistant?.stopReason !== "error" &&
-      ledger.lastAssistant?.stopReason !== "aborted" &&
-      ledger.limitReached() === undefined
-    ) {
-      ledger.invalidActions += 1;
-
-      if (ledger.limitReached() !== undefined) break;
-
-      await agent.prompt(NUDGE_MESSAGE);
+    if (!stop.signal.aborted) {
+      conversation = await play(input, conversation, ledger, reasoningStream, stop.signal);
     }
   } finally {
     clearTimeout(timer);
@@ -450,6 +489,47 @@ export const runWake = async (input: WakeInput): Promise<WakeResult> => {
     usage: ledger.usage,
     latencyMs: input.now() - startedAt,
     errorMessage: endReason === "modelError" ? (lastError ?? "Model error") : null,
-    messages: agent.state.messages,
+    conversation,
+    compaction:
+      compaction === null
+        ? null
+        : {
+            compacted: compaction.compacted,
+            summarizedWakes: compaction.summarizedWakes,
+            summary: compaction.summary,
+            usage: compaction.usage,
+          },
   };
 };
+
+const usd = (value: number): string => `$${value.toFixed(4)}`;
+
+const compactionNote = (compaction: WakeResult["compaction"]): string => {
+  if (compaction === null) return "";
+
+  const { usage } = compaction;
+  const cost = `${usage.inputTokens} input and ${usage.outputTokens} output tokens, ${usd(usage.costUsd)}`;
+
+  if (!compaction.compacted) {
+    return `[memory] Compacting the conversation failed (${cost}); it was kept as it was and is compacted at a later wake.`;
+  }
+
+  if (compaction.summary === null) {
+    return `[memory] ${compaction.summarizedWakes} earlier wakes were dropped: their summary came back empty (${cost}).`;
+  }
+
+  return `[memory] ${compaction.summarizedWakes} earlier wakes were summarized (${cost}):\n${compaction.summary}`;
+};
+
+/**
+ * The transcript `text` of a wake: the memory compaction (with its summary) if one ran, the
+ * model's visible text, and the model error if the wake ended on one.
+ */
+export const transcriptText = (result: WakeResult): string =>
+  [
+    compactionNote(result.compaction),
+    result.text,
+    result.errorMessage === null ? "" : `[model error] ${result.errorMessage}`,
+  ]
+    .filter((part) => part.length > 0)
+    .join("\n");

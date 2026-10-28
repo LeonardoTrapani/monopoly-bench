@@ -2,6 +2,10 @@
  * Read side of D1 behind the public API (SPEC.md §7.2): runs, games, leaderboard (per player
  * count, with head-to-head), models list and model profiles. Every result has exactly the
  * `@mb/api` shape.
+ *
+ * The leaderboard, head-to-head, models list and model profiles count LLM competitors in games
+ * where every seat is an LLM (SPEC §8): bots and games with a bot seat (local or legacy) never
+ * appear there. Runs and game lists show everything.
  */
 import {
   type BehaviorStats,
@@ -11,8 +15,8 @@ import {
   type LeaderboardEntry,
   type ModelProfile,
   type ModelsResponse,
-  type ModelCatalogEntry,
   PlayersCount,
+  RunFunding,
   RunStatus,
   type RunSummary,
   Seat,
@@ -30,6 +34,7 @@ const EndReasonColumn = Schema.NullOr(
 
 const RunRow = Schema.Struct({
   id: Schema.String,
+  funding: RunFunding,
   name: Schema.NullOr(Schema.String),
   created_at: Schema.String,
   status: RunStatus,
@@ -74,15 +79,23 @@ const SeatRow = Schema.Struct({
   timeouts: Schema.Int,
 });
 
-const RUN_COLUMNS = `r.id, r.name, r.created_at, r.status, r.players_count, r.seats_json, r.games_total, r.spent_usd, r.budget_usd,
+const RUN_COLUMNS = `r.id, r.funding, r.name, r.created_at, r.status, r.players_count, r.seats_json, r.games_total, r.spent_usd, r.budget_usd,
   (SELECT COUNT(*) FROM games g WHERE g.run_id = r.id AND g.status IN ('finished', 'aborted', 'failed')) AS games_finished,
   (SELECT COUNT(*) FROM games g WHERE g.run_id = r.id AND g.status = 'running') AS games_running`;
 
 const GAME_COLUMNS =
   "g.id, g.run_id, g.seed, g.status, g.players_count, g.started_at, g.finished_at, g.turn, g.round, g.end_reason, g.winner_seat";
 
+/** SQL: no seat of the game whose id is in `gameIdColumn` (a constant column name) is a bot. */
+const llmOnly = (gameIdColumn: string): string =>
+  `NOT EXISTS (SELECT 1 FROM seats bot_seat WHERE bot_seat.game_id = ${gameIdColumn} AND bot_seat.kind = 'bot')`;
+
+/** SQL: game `g` counts for ratings and statistics: finished, LLM seats only. */
+const RATED_GAME = `g.status = 'finished' AND ${llmOnly("g.id")}`;
+
 const toRunSummary = (row: typeof RunRow.Type): RunSummary => ({
   id: row.id,
+  funding: row.funding,
   name: row.name,
   createdAt: row.created_at,
   status: row.status,
@@ -283,7 +296,7 @@ const wakeAggregates = Effect.fn("wakeAggregates")(function* (playersCount: Play
       COUNT(*) AS wakes,
       COALESCE(AVG(w.latency_ms), 0) AS avg_wake_ms
     FROM wakes w JOIN games g ON g.id = w.game_id
-    WHERE g.status = 'finished' ${scope}
+    WHERE ${sql.literal(RATED_GAME)} ${scope}
     GROUP BY w.competitor_id`);
 });
 
@@ -292,13 +305,14 @@ export const leaderboard = Effect.fn("leaderboard")(function* (playersCount: Pla
 
   const ratings = yield* decodeRows(RatingRow)(sql`
     SELECT competitor_id, label, kind, mu, sigma, score, games, wins, updated_at
-    FROM ratings WHERE players_count = ${playersCount} ORDER BY score DESC, competitor_id`);
+    FROM ratings WHERE players_count = ${playersCount} AND kind = 'llm'
+    ORDER BY score DESC, competitor_id`);
 
   const placements = yield* decodeRows(PlacementAggregate)(sql`
     SELECT s.competitor_id, COUNT(DISTINCT s.game_id) AS games,
       AVG(s.final_rank) AS avg_place, COALESCE(AVG(s.net_worth), 0) AS avg_net_worth
     FROM seats s JOIN games g ON g.id = s.game_id
-    WHERE g.status = 'finished' AND g.players_count = ${playersCount} AND s.final_rank IS NOT NULL
+    WHERE ${sql.literal(RATED_GAME)} AND g.players_count = ${playersCount} AND s.final_rank IS NOT NULL
     GROUP BY s.competitor_id`);
 
   const wakes = yield* wakeAggregates(playersCount);
@@ -307,7 +321,7 @@ export const leaderboard = Effect.fn("leaderboard")(function* (playersCount: Pla
     WITH placed AS (
       SELECT s.game_id, s.competitor_id, MIN(s.final_rank) AS rank
       FROM seats s JOIN games g ON g.id = s.game_id
-      WHERE g.status = 'finished' AND g.players_count = ${playersCount} AND s.final_rank IS NOT NULL
+      WHERE ${sql.literal(RATED_GAME)} AND g.players_count = ${playersCount} AND s.final_rank IS NOT NULL
       GROUP BY s.game_id, s.competitor_id
     )
     SELECT a.competitor_id AS a, b.competitor_id AS b, COUNT(*) AS games,
@@ -369,7 +383,7 @@ const CompetitorRow = Schema.Struct({
   games: Schema.Int,
 });
 
-export const models = Effect.fn("models")(function* (catalog: ReadonlyArray<ModelCatalogEntry>) {
+export const models = Effect.fn("models")(function* () {
   const sql = yield* SqlClient.SqlClient;
 
   const rows = yield* decodeRows(CompetitorRow)(sql`
@@ -377,7 +391,7 @@ export const models = Effect.fn("models")(function* (catalog: ReadonlyArray<Mode
       COALESCE((SELECT r.label FROM ratings r WHERE r.competitor_id = s.competitor_id LIMIT 1), MAX(s.label)) AS label,
       MAX(s.kind) AS kind, COUNT(DISTINCT s.game_id) AS games
     FROM seats s JOIN games g ON g.id = s.game_id
-    WHERE g.status = 'finished'
+    WHERE ${sql.literal(RATED_GAME)}
     GROUP BY s.competitor_id
     ORDER BY games DESC, s.competitor_id`);
 
@@ -388,7 +402,6 @@ export const models = Effect.fn("models")(function* (catalog: ReadonlyArray<Mode
       kind: row.kind,
       games: row.games,
     })),
-    catalog,
   };
 
   return result;
@@ -438,18 +451,20 @@ const GameIdRow = Schema.Struct({ game_id: Schema.String });
 
 const behaviorStats = Effect.fn("behaviorStats")(function* (id: string) {
   const sql = yield* SqlClient.SqlClient;
+  const offersOfLlmGames = sql.literal(llmOnly("offers.game_id"));
 
   const [offers] = yield* decodeRows(OfferStatsRow)(sql`
     SELECT
-      (SELECT COUNT(*) FROM offers WHERE from_competitor = ${id}) AS offers_made,
-      (SELECT COUNT(*) FROM offers WHERE from_competitor = ${id} AND status = 'accepted') AS offers_accepted,
-      (SELECT COUNT(*) FROM offers WHERE to_competitor = ${id}) AS offers_received,
-      (SELECT COUNT(*) FROM offers WHERE accepted_by_competitor = ${id} AND from_competitor <> ${id}) AS offers_accepted_from_others`);
+      (SELECT COUNT(*) FROM offers WHERE from_competitor = ${id} AND ${offersOfLlmGames}) AS offers_made,
+      (SELECT COUNT(*) FROM offers WHERE from_competitor = ${id} AND status = 'accepted' AND ${offersOfLlmGames}) AS offers_accepted,
+      (SELECT COUNT(*) FROM offers WHERE to_competitor = ${id} AND ${offersOfLlmGames}) AS offers_received,
+      (SELECT COUNT(*) FROM offers WHERE accepted_by_competitor = ${id} AND from_competitor <> ${id} AND ${offersOfLlmGames}) AS offers_accepted_from_others`);
 
   const [auctions] = yield* decodeRows(AuctionStatsRow)(sql`
     SELECT COUNT(*) AS auctions_won,
       AVG(CASE WHEN list_price > 0 AND price IS NOT NULL THEN price / list_price END) AS auction_premium
-    FROM auctions WHERE winner_competitor = ${id} AND kind = 'property'`);
+    FROM auctions WHERE winner_competitor = ${id} AND kind = 'property'
+      AND ${sql.literal(llmOnly("auctions.game_id"))}`);
 
   const [seats] = yield* decodeRows(SeatStatsRow)(sql`
     SELECT COALESCE(SUM(properties_bought), 0) AS properties_bought,
@@ -458,7 +473,7 @@ const behaviorStats = Effect.fn("behaviorStats")(function* (id: string) {
       COALESCE(SUM(mortgages), 0) AS mortgages,
       COALESCE(SUM(jail_turns), 0) AS jail_turns,
       COUNT(bankrupt_at_turn) AS bankruptcies
-    FROM seats WHERE competitor_id = ${id}`);
+    FROM seats WHERE competitor_id = ${id} AND ${sql.literal(llmOnly("seats.game_id"))}`);
 
   const stats: BehaviorStats = {
     offersMade: offers?.offers_made ?? 0,
@@ -488,7 +503,7 @@ export const modelProfile = Effect.fn("modelProfile")(function* (id: string, rec
       SELECT label, kind, 1 AS priority FROM seats WHERE competitor_id = ${id}
     ) ORDER BY priority LIMIT 1`);
 
-  if (identity === undefined) return null;
+  if (identity === undefined || identity.kind === "bot") return null;
 
   const ratings = yield* decodeRows(ProfileRatingRow)(sql`
     SELECT players_count, mu, sigma, score, games, wins FROM ratings
@@ -500,13 +515,13 @@ export const modelProfile = Effect.fn("modelProfile")(function* (id: string, rec
 
   const [finished] = yield* decodeRows(CountRow)(sql`
     SELECT COUNT(DISTINCT s.game_id) AS n FROM seats s JOIN games g ON g.id = s.game_id
-    WHERE s.competitor_id = ${id} AND g.status = 'finished'`);
+    WHERE s.competitor_id = ${id} AND ${sql.literal(RATED_GAME)}`);
 
   const usage = (yield* wakeAggregates(null)).find((row) => row.competitor_id === id);
 
   const recentIds = yield* decodeRows(GameIdRow)(sql`
     SELECT s.game_id FROM seats s JOIN games g ON g.id = s.game_id
-    WHERE s.competitor_id = ${id}
+    WHERE s.competitor_id = ${id} AND ${sql.literal(llmOnly("g.id"))}
     GROUP BY s.game_id
     ORDER BY MAX(COALESCE(g.finished_at, g.started_at, g.updated_at)) DESC
     LIMIT ${recentLimit}`);

@@ -7,7 +7,7 @@ import { openRouterModels, resolveOpenRouterModel } from "@mb/agent";
 
 import type { WorkerEnv } from "../../alchemy.run.ts";
 import type { WakeRequest } from "../contracts.ts";
-import { PlayerHost } from "../player/player-host.ts";
+import { openRouterKeyFor, PlayerHost } from "../player/player-host.ts";
 import { durableAlarm, durableSql, logError } from "./runtime.ts";
 
 export class PlayerDO extends DurableObject<WorkerEnv> {
@@ -27,10 +27,14 @@ export class PlayerDO extends DurableObject<WorkerEnv> {
         activity: (gameId, activity) => game(gameId).activity(activity),
         wakeFinished: (report) => game(report.gameId).wakeFinished(report),
       },
-      models: (request) => ({
+      // Who pays is asked of the run before every wake: an own-key run's key is never stored here.
+      models: async (request) => ({
         model: resolveOpenRouterModel(models, request.spec.model, request.listing ?? undefined),
         streamFn: models.streamSimple.bind(models),
-        apiKey: env.OPENROUTER_API_KEY.length === 0 ? undefined : env.OPENROUTER_API_KEY,
+        apiKey: openRouterKeyFor(
+          await env.RUNS.getByName(request.runId).credentials(),
+          env.OPENROUTER_API_KEY,
+        ),
       }),
       setAlarm: durableAlarm(ctx.storage),
       now: Date.now,
@@ -41,6 +45,11 @@ export class PlayerDO extends DurableObject<WorkerEnv> {
   /** GameDO → PlayerDO: acknowledged at once; the alarm runs the model. */
   wake(request: WakeRequest): Promise<void> {
     return this.host.wake(request);
+  }
+
+  /** RunDO → PlayerDO when the run is deleted. */
+  purge(): Promise<void> {
+    return this.host.purge();
   }
 
   override alarm(): Promise<void> {

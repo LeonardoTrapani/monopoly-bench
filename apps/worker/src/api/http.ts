@@ -4,8 +4,8 @@ import { Schema } from "effect";
 
 export const CORS_HEADERS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, POST, OPTIONS",
-  "access-control-allow-headers": "authorization, content-type",
+  "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+  "access-control-allow-headers": "authorization, content-type, x-openrouter-key, x-run-token",
   "access-control-max-age": "86400",
 } as const satisfies Readonly<Record<string, string>>;
 
@@ -49,3 +49,5 @@ export const jsonText = (body: string): Response =>
   });
 
 export const preflight = (): Response => new Response(null, { status: 204, headers: CORS_HEADERS });
+
+export const noContent = (): Response => new Response(null, { status: 204, headers: CORS_HEADERS });

@@ -92,6 +92,13 @@ export class GameDO extends DurableObject<WorkerEnv> {
     return this.host.budgetExhausted();
   }
 
+  /** RunDO → GameDO when the run is deleted: forget the game and close spectator sockets. */
+  async purge(): Promise<void> {
+    await this.host.purge();
+
+    for (const socket of this.ctx.getWebSockets()) socket.close(1000, "game deleted");
+  }
+
   events(since: number): string {
     return this.host.eventsSince(since);
   }

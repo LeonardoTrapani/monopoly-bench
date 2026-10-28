@@ -1,9 +1,11 @@
 /**
- * Scripted models for tests and offline simulations, on pi-ai's faux provider (no network).
- * `@mb/agent/testing`.
+ * Scripted models for tests and offline simulations, on pi-ai's faux provider (no network), and
+ * a sample of OpenRouter's model list. `@mb/agent/testing`.
  */
+import { readFileSync } from "node:fs";
+
 import type { StreamFn } from "@earendil-works/pi-agent-core";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model, ModelCost } from "@earendil-works/pi-ai";
 import { calculateCost, createModels } from "@earendil-works/pi-ai/models";
 import {
   fauxAssistantMessage,
@@ -25,15 +27,20 @@ export interface ScriptedModel {
 }
 
 /** `$1` per input token and `$2` per output token, so costs are easy to check. */
-export const scriptedModel = (responses: ReadonlyArray<FauxResponseStep>): ScriptedModel => {
+export const DOLLAR_PER_TOKEN: ModelCost = {
+  input: 1_000_000,
+  output: 2_000_000,
+  cacheRead: 0,
+  cacheWrite: 0,
+};
+
+/** Prices in USD per million tokens (`DOLLAR_PER_TOKEN` unless given). */
+export const scriptedModel = (
+  responses: ReadonlyArray<FauxResponseStep>,
+  cost: ModelCost = DOLLAR_PER_TOKEN,
+): ScriptedModel => {
   const faux = fauxProvider({
-    models: [
-      {
-        id: "scripted-player",
-        reasoning: true,
-        cost: { input: 1_000_000, output: 2_000_000, cacheRead: 0, cacheWrite: 0 },
-      },
-    ],
+    models: [{ id: "scripted-player", reasoning: true, cost }],
   });
 
   const models = createModels();
@@ -59,3 +66,11 @@ export const scriptedModel = (responses: ReadonlyArray<FauxResponseStep>): Scrip
 /** An assistant turn that calls the given tools. */
 export const toolTurn = (...calls: ReadonlyArray<ReturnType<typeof fauxToolCall>>) =>
   fauxAssistantMessage([...calls], { stopReason: "toolUse" });
+
+/**
+ * A `GET https://openrouter.ai/api/v1/models` body with nine real entries (fetched 2026-10-28,
+ * trimmed to the fields we read): featured and other tool models, a "Provider:"-less name, an
+ * alias (`~anthropic/…`), a variable-price router (`openrouter/auto`) and one model without tools.
+ */
+export const openRouterModelListSample = (): string =>
+  readFileSync(new URL("./__fixtures__/openrouter-models.json", import.meta.url), "utf8");

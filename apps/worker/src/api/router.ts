@@ -1,16 +1,19 @@
 /**
- * The HTTP API (SPEC.md §7.2). Public routes are read-only with open CORS; `POST` routes need
- * `Authorization: Bearer <BENCH_API_KEY>`. Bodies are the `@mb/api` schemas.
+ * The HTTP API (SPEC.md §7.2). Public routes are read-only with open CORS. Creating a run needs
+ * `Authorization: Bearer <BENCH_API_KEY>` (server-funded) or the creator's own OpenRouter key in
+ * `x-openrouter-key` (paid with it); cancelling needs the bearer or the run's `x-run-token`;
+ * deleting needs the bearer. Bodies are the `@mb/api` schemas.
  *
- * Effects need the D1 `SqlClient`; Durable Objects and R2 are reached through `ApiDeps`, so
- * the router runs unchanged against fakes in tests.
+ * Effects need D1 (`SqlClient`, `D1Client` for batches); Durable Objects, R2, the catalog and
+ * OpenRouter are reached through `ApiDeps`, so the router runs unchanged against fakes in tests.
  */
 import {
+  BotSeat,
+  CatalogResponse,
   CreateRunResponse,
   GameSummary,
   GamesResponse,
   Leaderboard,
-  type ModelCatalogEntry,
   ModelProfile,
   ModelsResponse,
   PlayersCount,
@@ -20,11 +23,13 @@ import {
   type RunSummary,
   Seat,
 } from "@mb/api";
-import { Cause, Effect, Match, Option, Schema } from "effect";
+import type { D1Client } from "@effect/sql-d1";
+import { Cause, Effect, Option, Schema } from "effect";
 import { SqlClient } from "effect/sql";
 import type { SqlError } from "effect/sql/SqlError";
 
-import type { ModelListing } from "../contracts.ts";
+import { type CatalogSnapshot, runModelProblem } from "../catalog.ts";
+import type { ModelListing, OwnKeyFunding } from "../contracts.ts";
 import {
   getGame,
   getRun,
@@ -34,16 +39,25 @@ import {
   modelProfile,
   models,
 } from "../db/queries.ts";
-import { isAuthorized } from "./auth.ts";
-import { errorJson, json, jsonText, ndjson, preflight } from "./http.ts";
+import { recomputeRatings } from "../db/ratings-store.ts";
+import { deleteRunGames, deleteRunRow, runGameIds, runPlayersCount } from "../db/writes.ts";
+import type { KeyCheck } from "../openrouter-key.ts";
+import { isAuthorized, sha256Hex } from "./auth.ts";
+import { errorJson, json, jsonText, ndjson, noContent, preflight } from "./http.ts";
 
 export interface RunsGateway {
+  /** `ownKey` is null for a server-funded run. */
   readonly create: (
     runId: string,
     config: RunConfig,
     listings: ReadonlyArray<ModelListing>,
+    ownKey: OwnKeyFunding | null,
   ) => Promise<RunSummary>;
   readonly cancel: (runId: string) => Promise<RunSummary | null>;
+  /** Whether `tokenSha256` is the SHA-256 of the run's cancel token (own-key runs only). */
+  readonly cancelTokenMatches: (runId: string, tokenSha256: string) => Promise<boolean>;
+  /** Stop the run's games for good and wipe its Durable Objects (run, games, seats). */
+  readonly purge: (runId: string) => Promise<void>;
 }
 
 export interface GamesGateway {
@@ -61,17 +75,27 @@ export interface GamesGateway {
   readonly archivedConfig: (gameId: string) => Promise<string | null>;
   /** Forward a WebSocket upgrade to the game's Durable Object. */
   readonly spectate: (gameId: string, request: Request) => Promise<Response>;
+  /** Delete every R2 object of these games of the run (`games/<gameId>/…`). */
+  readonly deleteArchives: (runId: string, gameIds: ReadonlyArray<string>) => Promise<void>;
 }
 
 export interface ApiDeps {
   readonly benchApiKey: string;
-  readonly catalog: ReadonlyArray<ModelCatalogEntry>;
   readonly runs: RunsGateway;
   readonly games: GamesGateway;
-  /** Public OpenRouter prices of these model ids (no key needed); [] when unavailable. */
-  readonly listings: (modelIds: ReadonlyArray<string>) => Promise<ReadonlyArray<ModelListing>>;
+  /** OpenRouter's tool models and their prices (`GET /api/catalog`, run validation). */
+  readonly catalog: () => Promise<CatalogSnapshot>;
+  /** Asks OpenRouter about a creator's own key (`GET /api/v1/key`). */
+  readonly checkOpenRouterKey: (key: string) => Promise<KeyCheck>;
   readonly newRunId: () => string;
+  readonly newCancelToken: () => string;
 }
+
+/** Header carrying the creator's own OpenRouter key on `POST /api/runs`. */
+export const OWN_KEY_HEADER = "x-openrouter-key";
+
+/** Header carrying an own-key run's cancel token on `POST /api/runs/:id/cancel`. */
+export const RUN_TOKEN_HEADER = "x-run-token";
 
 const LIST_LIMIT = 100;
 
@@ -82,6 +106,13 @@ const decodePlayers = Schema.decodeUnknownOption(
 );
 
 const decodeRunConfig = Schema.decodeUnknownEffect(Schema.fromJsonString(RunConfig));
+
+/** Just enough of a run body to tell that it seats a bot. */
+const decodeSeats = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ players: Schema.Array(Schema.Unknown) })),
+);
+
+const isBotSeat = Schema.is(BotSeat);
 
 const decodeSince = Schema.decodeUnknownOption(
   Schema.NumberFromString.pipe(Schema.decodeTo(Schema.Int)),
@@ -100,10 +131,17 @@ class HttpFailure extends Schema.TaggedError<HttpFailure>()("HttpFailure", {
 
 const fail = (status: number, message: string) => Effect.fail(new HttpFailure({ status, message }));
 
-const requireAuth = (request: Request, deps: ApiDeps) =>
-  promise(() => isAuthorized(request.headers.get("authorization"), deps.benchApiKey)).pipe(
-    Effect.flatMap((ok) => (ok ? Effect.void : fail(401, "Missing or invalid API key"))),
-  );
+const isBenchOwner = (request: Request, deps: ApiDeps) =>
+  promise(() => isAuthorized(request.headers.get("authorization"), deps.benchApiKey));
+
+const requireAuth = (request: Request, deps: ApiDeps, message: string) =>
+  isBenchOwner(request, deps).pipe(Effect.flatMap((ok) => (ok ? Effect.void : fail(401, message))));
+
+const header = (request: Request, name: string): string | null => {
+  const value = request.headers.get(name)?.trim() ?? "";
+
+  return value.length === 0 ? null : value;
+};
 
 const playersParam = (
   url: URL,
@@ -121,35 +159,156 @@ const playersParam = (
   });
 };
 
+const usd = (value: number): string => `$${value.toFixed(2)}`;
+
+/** Checks an own key with OpenRouter; it must cover the run's budget if it has a limit. */
+const checkOwnKey = Effect.fn("checkOwnKey")(function* (
+  deps: ApiDeps,
+  key: string,
+  budgetUsd: number,
+) {
+  const check = yield* promise(() => deps.checkOpenRouterKey(key));
+
+  if (check.status === "rejected") {
+    return yield* fail(
+      401,
+      `OpenRouter rejected the key in ${OWN_KEY_HEADER} (invalid, disabled or expired).`,
+    );
+  }
+
+  if (check.status === "unavailable") {
+    return yield* fail(
+      502,
+      `Could not check the key in ${OWN_KEY_HEADER} with OpenRouter (${check.reason}); try again.`,
+    );
+  }
+
+  if (check.limitRemainingUsd !== null && check.limitRemainingUsd < budgetUsd) {
+    return yield* fail(
+      400,
+      `The key in ${OWN_KEY_HEADER} has ${usd(check.limitRemainingUsd)} of credit left, less than the run budget of ${usd(budgetUsd)}: lower budgetUsd or raise the key's limit on OpenRouter.`,
+    );
+  }
+});
+
 const createRun = Effect.fn("createRun")(function* (request: Request, deps: ApiDeps) {
-  yield* requireAuth(request, deps);
+  const ownKey = header(request, OWN_KEY_HEADER);
+
+  if (ownKey === null) {
+    yield* requireAuth(
+      request,
+      deps,
+      `Missing or invalid API key: send Authorization: Bearer <BENCH_API_KEY>, or your own OpenRouter key in ${OWN_KEY_HEADER}.`,
+    );
+  }
 
   const body = yield* promise(() => request.text());
+
+  const seatsBot = Option.match(decodeSeats(body), {
+    onSome: (seats) => seats.players.some(isBotSeat),
+    onNone: () => false,
+  });
+
+  if (seatsBot) {
+    return yield* fail(400, "Public runs seat LLMs only; bots play in local simulations (mb sim).");
+  }
 
   const config = yield* decodeRunConfig(body).pipe(
     Effect.catchTag("SchemaError", (error) => fail(400, `Invalid RunConfig: ${error.message}`)),
   );
 
-  const modelIds = config.players.flatMap((seat) =>
-    Match.valueTags(seat, { llm: (llm) => [llm.model], bot: () => [] }),
+  const snapshot = yield* promise(() => deps.catalog());
+  const modelIds = [...new Set(config.players.map((seat) => seat.model))];
+
+  const problems = modelIds.flatMap((model) => {
+    const problem = runModelProblem(snapshot, model);
+
+    return problem === null ? [] : [problem];
+  });
+
+  if (problems.length > 0) return yield* fail(400, problems.join(" "));
+
+  const listings = modelIds.flatMap((model) => {
+    const listing = snapshot.listings.get(model);
+
+    return listing === undefined ? [] : [listing];
+  });
+
+  if (ownKey === null) {
+    const run = yield* promise(() => deps.runs.create(deps.newRunId(), config, listings, null));
+
+    return json(CreateRunResponse, { run, cancelToken: null }, 201);
+  }
+
+  yield* checkOwnKey(deps, ownKey, config.budgetUsd);
+
+  const cancelToken = deps.newCancelToken();
+  const cancelTokenSha256 = yield* promise(() => sha256Hex(cancelToken));
+
+  const run = yield* promise(() =>
+    deps.runs.create(deps.newRunId(), config, listings, {
+      openRouterKey: ownKey,
+      cancelTokenSha256,
+    }),
   );
 
-  const listings = yield* promise(() => deps.listings([...new Set(modelIds)]));
-  const run = yield* promise(() => deps.runs.create(deps.newRunId(), config, listings));
-
-  return json(CreateRunResponse, { run }, 201);
+  return json(CreateRunResponse, { run, cancelToken }, 201);
 });
 
+/** The bench bearer cancels any run; an own-key run's creator cancels it with its token. */
 const cancelRun = Effect.fn("cancelRun")(function* (
   request: Request,
   deps: ApiDeps,
   runId: string,
 ) {
-  yield* requireAuth(request, deps);
+  if (!(yield* isBenchOwner(request, deps))) {
+    const token = header(request, RUN_TOKEN_HEADER);
+
+    const matches =
+      token !== null &&
+      (yield* promise(async () => deps.runs.cancelTokenMatches(runId, await sha256Hex(token))));
+
+    if (!matches) {
+      return yield* fail(
+        401,
+        `Missing or invalid API key or run token: send Authorization: Bearer <BENCH_API_KEY> or the run's cancel token in ${RUN_TOKEN_HEADER}.`,
+      );
+    }
+  }
 
   const run = yield* promise(() => deps.runs.cancel(runId));
 
-  return run === null ? errorJson(404, "Run not found") : json(CreateRunResponse, { run });
+  return run === null
+    ? errorJson(404, "Run not found")
+    : json(CreateRunResponse, { run, cancelToken: null });
+});
+
+/**
+ * Removes a run: its Durable Objects (games stop for good), R2 archives and D1 rows, then
+ * replays the ratings of its player count without its games. The `runs` row goes last, so an
+ * interrupted deletion can be retried.
+ */
+const deleteRun = Effect.fn("deleteRun")(function* (
+  request: Request,
+  deps: ApiDeps,
+  runId: string,
+) {
+  yield* requireAuth(request, deps, "Missing or invalid API key");
+
+  const playersCount = yield* runPlayersCount(runId);
+
+  if (playersCount === null) return errorJson(404, "Run not found");
+
+  yield* promise(() => deps.runs.purge(runId));
+
+  const gameIds = yield* runGameIds(runId);
+
+  yield* promise(() => deps.games.deleteArchives(runId, gameIds));
+  yield* deleteRunGames(runId);
+  yield* recomputeRatings(playersCount);
+  yield* deleteRunRow(runId);
+
+  return noContent();
 });
 
 const gameEvents = Effect.fn("gameEvents")(function* (deps: ApiDeps, gameId: string, url: URL) {
@@ -243,7 +402,7 @@ const route = (
 ): Effect.Effect<
   Response,
   HttpFailure | Error | Schema.SchemaError | SqlError,
-  SqlClient.SqlClient
+  SqlClient.SqlClient | D1Client.D1Client
 > => {
   const url = new URL(request.url);
 
@@ -264,9 +423,14 @@ const route = (
     );
   }
 
+  if (resource === "catalog" && parts.length === 1 && method === "GET") {
+    return promise(() => deps.catalog()).pipe(
+      Effect.map((snapshot) => json(CatalogResponse, snapshot.catalog)),
+    );
+  }
+
   if (resource === "models" && method === "GET") {
-    if (parts.length === 1)
-      return models(deps.catalog).pipe(Effect.map((body) => json(ModelsResponse, body)));
+    if (parts.length === 1) return models().pipe(Effect.map((body) => json(ModelsResponse, body)));
 
     // Competitor ids contain "/" and ":", so the id is the rest of the path (encoded or not).
     const competitor = decodeURIComponent(url.pathname.replace(/^\/api\/models\//, ""));
@@ -291,6 +455,10 @@ const route = (
           detail === null ? errorJson(404, "Run not found") : json(RunDetail, detail),
         ),
       );
+    }
+
+    if (parts.length === 2 && id !== undefined && method === "DELETE") {
+      return deleteRun(request, deps, id);
     }
 
     if (parts.length === 3 && id !== undefined && action === "cancel" && method === "POST") {
@@ -354,7 +522,7 @@ const route = (
 export const handleApi = (
   request: Request,
   deps: ApiDeps,
-): Effect.Effect<Response, never, SqlClient.SqlClient> =>
+): Effect.Effect<Response, never, SqlClient.SqlClient | D1Client.D1Client> =>
   route(request, deps).pipe(
     Effect.catchTag("HttpFailure", (failure) =>
       Effect.succeed(errorJson(failure.status, failure.message)),

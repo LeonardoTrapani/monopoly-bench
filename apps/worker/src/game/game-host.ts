@@ -103,6 +103,18 @@ CREATE TABLE IF NOT EXISTS transcripts (
 CREATE TABLE IF NOT EXISTS stale_archives (seat TEXT PRIMARY KEY);
 `;
 
+const TABLES = [
+  "meta",
+  "events",
+  "snapshot",
+  "cursors",
+  "notes",
+  "decisions",
+  "calls",
+  "transcripts",
+  "stale_archives",
+] as const;
+
 const ValueRow = Schema.Struct({ value: Schema.String });
 
 const JsonRow = Schema.Struct({ json: Schema.String });
@@ -168,6 +180,8 @@ export class GameHost<S, E extends EngineEvent, C> {
   private finishPending = false;
   private snapshotStale = false;
   private progressTurn = -1;
+  /** The game was deleted: work still in flight must not write anything more. */
+  private purged = false;
 
   constructor(
     private readonly ports: GameHostPorts,
@@ -294,6 +308,7 @@ export class GameHost<S, E extends EngineEvent, C> {
       // A report arriving after GameDO's deadline is a timeout too.
       timedOut: transcript.timedOut || processed?.status === "expired",
       endReason: report.endReason,
+      compactions: report.compactions,
     });
 
     const charged = await this.ports.run.charge(
@@ -302,6 +317,8 @@ export class GameHost<S, E extends EngineEvent, C> {
       `${game.gameId}:${report.seat}:${report.decisionId}`,
       transcript.usage.costUsd,
     );
+
+    if (this.purged) return;
 
     if (charged.exhausted) this.setMeta("budgetExhausted", "1");
 
@@ -340,6 +357,22 @@ export class GameHost<S, E extends EngineEvent, C> {
 
     this.applyCommand(this.binding.engine.abortCommand(reason), true);
     await this.kick();
+  }
+
+  /**
+   * RunDO → GameDO when the run is deleted: empty every table and clear the alarm. The game is
+   * forgotten: later calls find no game, and work already in flight stops before its next write
+   * (no archive, no D1 summary, no run notification).
+   */
+  async purge(): Promise<void> {
+    this.purged = true;
+    this.ports.sql.transaction(() => {
+      for (const table of TABLES) this.ports.sql.exec(`DELETE FROM ${table}`);
+    });
+    this.game = undefined;
+    this.state = undefined;
+    this.finishPending = false;
+    await this.ports.setAlarm(null);
   }
 
   async alarm(): Promise<void> {
@@ -651,6 +684,7 @@ export class GameHost<S, E extends EngineEvent, C> {
         invalidActions: 0,
         timedOut: true,
         endReason: "noReport",
+        compactions: 0,
       });
     }
   }
@@ -667,6 +701,8 @@ export class GameHost<S, E extends EngineEvent, C> {
 
   /** Re-run the settle loop soon: inline if one is running, otherwise through the alarm. */
   private async kick(): Promise<void> {
+    if (this.purged) return;
+
     if (this.settling) {
       this.dirty = true;
 
@@ -880,7 +916,6 @@ export class GameHost<S, E extends EngineEvent, C> {
       runId: game.runId,
       seat: decision.seat,
       decisionId: decision.decisionId,
-      sessionKey: decision.sessionKey,
       turn: engine.pending(state).turn,
       frame: decision.frame,
       round: decision.round,
@@ -918,6 +953,8 @@ export class GameHost<S, E extends EngineEvent, C> {
   }
 
   private async armAlarm(): Promise<void> {
+    if (this.purged) return;
+
     if (this.continueLater || this.dirty) {
       await this.ports.setAlarm(this.ports.now());
 
@@ -958,7 +995,7 @@ export class GameHost<S, E extends EngineEvent, C> {
       this.ports.sql.exec("DELETE FROM stale_archives WHERE seat = ?", seat);
 
       try {
-        await this.ports.archive.put(
+        await this.archivePut(
           archiveKeys.seat(game.gameId, seat),
           this.transcripts(seat),
           "application/x-ndjson",
@@ -1002,26 +1039,26 @@ export class GameHost<S, E extends EngineEvent, C> {
     const pending = engine.pending(state);
 
     try {
-      await this.ports.archive.put(
+      await this.archivePut(
         archiveKeys.config(game.gameId),
         `${JSON.stringify(codec.encodeConfig(game.config), null, 2)}\n`,
         "application/json",
       );
-      await this.ports.archive.put(
+      await this.archivePut(
         archiveKeys.events(game.gameId),
         events.map((event) => `${stringify(codec.encodeEvent(event))}\n`).join(""),
         "application/x-ndjson",
       );
 
       for (const seat of game.seats) {
-        await this.ports.archive.put(
+        await this.archivePut(
           archiveKeys.seat(game.gameId, seat.seat),
           this.transcripts(seat.seat),
           "application/x-ndjson",
         );
       }
 
-      await this.ports.archive.put(
+      await this.archivePut(
         archiveKeys.summary(game.gameId),
         `${JSON.stringify(
           {
@@ -1054,6 +1091,8 @@ export class GameHost<S, E extends EngineEvent, C> {
         )}\n`,
         "application/json",
       );
+
+      if (this.purged) return;
 
       await this.ports.db.finish({
         gameId: game.gameId,
@@ -1104,6 +1143,8 @@ export class GameHost<S, E extends EngineEvent, C> {
         })),
       });
 
+      if (this.purged) return;
+
       await this.ports.run.gameFinished(game.runId, {
         gameId: game.gameId,
         status,
@@ -1123,6 +1164,8 @@ export class GameHost<S, E extends EngineEvent, C> {
       return;
     }
 
+    if (this.purged) return;
+
     this.setMeta("finishedNotified", finishedAt);
     this.setMeta("status", status);
     this.finishPending = false;
@@ -1130,6 +1173,13 @@ export class GameHost<S, E extends EngineEvent, C> {
   }
 
   // ── small helpers ─────────────────────────────────────────────────────────────────────
+
+  /** R2 write that a deleted game skips (its archive is being deleted). */
+  private async archivePut(key: string, body: string, contentType: string): Promise<void> {
+    if (this.purged) return;
+
+    await this.ports.archive.put(key, body, contentType);
+  }
 
   private eventsAfter(since: number): ReadonlyArray<E> {
     return queryRows(

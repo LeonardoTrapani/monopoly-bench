@@ -1,4 +1,7 @@
-/** Bearer authentication of the protected routes (SPEC.md §7.2). */
+/**
+ * Authentication of the protected routes (SPEC.md §7.2): the bench owner's bearer key, and the
+ * cancel tokens of own-key runs (random, returned once, stored only as SHA-256).
+ */
 
 const encoder = new TextEncoder();
 
@@ -36,4 +39,18 @@ export const isAuthorized = async (
   if (apiKey.length === 0 || token === null) return false;
 
   return constantTimeEqual(token, apiKey);
+};
+
+/** Lowercase hex SHA-256 of a UTF-8 string: how a run stores its cancel token. */
+export const sha256Hex = async (text: string): Promise<string> =>
+  [...(await sha256(text))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+
+/** 32 random bytes, base64url without padding (43 characters). */
+export const newCancelToken = (): string => {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
 };

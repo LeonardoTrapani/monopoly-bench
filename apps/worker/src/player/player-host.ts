@@ -4,28 +4,40 @@
  * Alarm-driven: `wake()` only stores the request and arms the alarm, so GameDO's call returns
  * at once and no request stays open while the model thinks. The alarm runs the Pi agent
  * (`@mb/agent` `runWake`); its tools call GameDO (`submit`, `done`, `inspect`) and its activity
- * streams to GameDO for spectators. The session conversation is kept in SQLite between the
- * rounds of one session and dropped when a new session starts.
+ * streams to GameDO for spectators. The seat's conversation lasts the whole game (SPEC §6.2):
+ * one SQLite row per message, appended after every wake and rewritten only by a compaction.
+ *
+ * The OpenRouter key of a wake comes from `models` (the run's own key or the server's) and lives
+ * in memory for that wake only; it is scrubbed from what the wake reports.
  *
  * A wake cut off by an eviction is never re-run (it would pay the model twice and may be past
  * its deadline): the next alarm reports it as interrupted and GameDO applies the default.
  */
 import {
-  type AgentMessage,
   type Api,
+  type Conversation,
+  decodeAgentMessage,
+  DEFAULT_MEMORY_LIMITS,
+  encodeAgentMessage,
+  type MemoryLimits,
   type Model,
-  type StreamFn,
-  decodeSession,
-  encodeSession,
   runWake,
+  type StreamFn,
   type ToolExecutor,
+  transcriptText,
   type WakeEndReason,
 } from "@mb/agent";
 import type { SeatActivity, WakeTranscript } from "@mb/api";
 import { Schema } from "effect";
 
-import { type SeatCall, type SeatCallResult, WakeReport, WakeRequest } from "../contracts.ts";
-import { jsonColumn, queryFirst, queryRows, type SqlPort } from "../sql.ts";
+import {
+  type ModelCredentials,
+  type SeatCall,
+  type SeatCallResult,
+  WakeReport,
+  WakeRequest,
+} from "../contracts.ts";
+import { jsonColumn, queryRows, type SqlPort } from "../sql.ts";
 
 export interface GameLinkPort {
   readonly submit: (call: SeatCall) => Promise<SeatCallResult>;
@@ -45,20 +57,37 @@ export interface ModelAccess {
 export interface PlayerHostPorts {
   readonly sql: SqlPort;
   readonly game: GameLinkPort;
-  readonly models: (request: WakeRequest) => ModelAccess;
+  /** Resolved before every wake (an own-key run's key is read from its RunDO then). */
+  readonly models: (request: WakeRequest) => Promise<ModelAccess>;
   readonly setAlarm: (at: number | null) => Promise<void>;
   readonly now: () => number;
   readonly log: (message: string, cause?: unknown) => void;
+  /** Conversation budget (default `DEFAULT_MEMORY_LIMITS`). */
+  readonly memory?: MemoryLimits;
 }
+
+/**
+ * The key a wake calls OpenRouter with: the run's own key for an own-key run (none once the
+ * run deleted it, so the wake fails fast), never the server's.
+ */
+export const openRouterKeyFor = (
+  credentials: ModelCredentials,
+  serverKey: string,
+): string | undefined => {
+  if (credentials.funding === "ownKey") return credentials.openRouterKey ?? undefined;
+
+  return serverKey.length === 0 ? undefined : serverKey;
+};
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS wakes (
   decision_id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at INTEGER NOT NULL,
   request_json TEXT NOT NULL, report_json TEXT
 );
-CREATE TABLE IF NOT EXISTS session (
-  id INTEGER PRIMARY KEY CHECK (id = 1), session_key TEXT NOT NULL, messages TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS conversation (
+  idx INTEGER PRIMARY KEY, wake_start INTEGER NOT NULL, json TEXT NOT NULL
 );
+DROP TABLE IF EXISTS session;
 `;
 
 const WakeRow = Schema.Struct({
@@ -68,7 +97,7 @@ const WakeRow = Schema.Struct({
   report_json: Schema.NullOr(Schema.String),
 });
 
-const SessionRow = Schema.Struct({ session_key: Schema.String, messages: Schema.String });
+const MessageRow = Schema.Struct({ wake_start: Schema.Int, json: Schema.String });
 
 const decodeRequest = jsonColumn(WakeRequest);
 
@@ -83,7 +112,19 @@ const encodeReport = Schema.encodeSync(Schema.fromJsonString(WakeReport));
 
 const emptyUsage = { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, costUsd: 0 };
 
+const REDACTED = "[redacted key]";
+
+/** `text` without any occurrence of `secret`. */
+const scrub = (text: string, secret: string | undefined): string =>
+  secret === undefined || secret.length === 0 ? text : text.replaceAll(secret, REDACTED);
+
+const describeCause = (cause: unknown): string =>
+  cause instanceof Error ? (cause.stack ?? cause.message) : String(cause);
+
 export class PlayerHost {
+  /** The game was deleted: a wake still in flight must not write anything more. */
+  private purged = false;
+
   constructor(private readonly ports: PlayerHostPorts) {
     ports.sql.exec(SCHEMA);
   }
@@ -115,14 +156,14 @@ export class PlayerHost {
       }
 
       if (row.status === "running") {
-        await this.report(request, this.emptyTranscript(request), 0, "interrupted");
+        await this.report(request, this.emptyTranscript(request), 0, "interrupted", 0);
         continue;
       }
 
       this.setStatus(request.decisionId, "running");
 
       if (this.ports.now() > request.deadline) {
-        await this.report(request, this.emptyTranscript(request), 0, "expired");
+        await this.report(request, this.emptyTranscript(request), 0, "expired", 0);
         continue;
       }
 
@@ -130,22 +171,68 @@ export class PlayerHost {
     }
   }
 
-  private async run(request: WakeRequest): Promise<void> {
-    const startedAt = new Date(this.ports.now()).toISOString();
+  /** RunDO → PlayerDO when the run is deleted: drop every wake and the conversation. */
+  async purge(): Promise<void> {
+    this.purged = true;
+    this.ports.sql.transaction(() => {
+      this.ports.sql.exec("DELETE FROM wakes");
+      this.ports.sql.exec("DELETE FROM conversation");
+    });
+    await this.ports.setAlarm(null);
+  }
 
-    const session = queryFirst(
+  /** The seat's conversation so far, from its rows. */
+  conversation(): Conversation {
+    const rows = queryRows(
       this.ports.sql,
-      SessionRow,
-      "SELECT session_key, messages FROM session WHERE id = 1",
+      MessageRow,
+      "SELECT wake_start, json FROM conversation ORDER BY idx",
     );
 
-    const history: ReadonlyArray<AgentMessage> =
-      session !== undefined && session.session_key === request.sessionKey
-        ? decodeSession(session.messages)
-        : [];
+    return {
+      messages: rows.map((row) => decodeAgentMessage(row.json)),
+      wakeStarts: rows.flatMap((row, index) => (row.wake_start === 1 ? [index] : [])),
+    };
+  }
+
+  /**
+   * Appends the wake's new messages; a compaction rewrites the conversation. Provider errors
+   * are kept in the conversation, so the wake's key is scrubbed from them as well.
+   */
+  private saveConversation(
+    before: Conversation,
+    after: Conversation,
+    rewritten: boolean,
+    apiKey: string | undefined,
+  ): void {
+    const starts = new Set(after.wakeStarts);
+    const from = rewritten ? 0 : before.messages.length;
+
+    this.ports.sql.transaction(() => {
+      if (rewritten) this.ports.sql.exec("DELETE FROM conversation");
+
+      after.messages.slice(from).forEach((message, offset) => {
+        const index = from + offset;
+
+        this.ports.sql.exec(
+          "INSERT INTO conversation (idx, wake_start, json) VALUES (?, ?, ?)",
+          index,
+          starts.has(index) ? 1 : 0,
+          scrub(encodeAgentMessage(message), apiKey),
+        );
+      });
+    });
+  }
+
+  private async run(request: WakeRequest): Promise<void> {
+    const startedAt = new Date(this.ports.now()).toISOString();
+    let apiKey: string | undefined;
 
     try {
-      const access = this.ports.models(request);
+      const access = await this.ports.models(request);
+      const before = this.conversation();
+
+      apiKey = access.apiKey;
 
       const result = await runWake({
         identity: {
@@ -162,23 +249,27 @@ export class PlayerHost {
         reasoning: request.spec.reasoning,
         maxOutputTokens: request.spec.maxOutputTokens,
         systemPrompt: request.systemPrompt,
-        history,
+        conversation: before,
         message: request.message,
         executor: this.executor(request),
         limits: request.limits,
+        memory: this.ports.memory ?? DEFAULT_MEMORY_LIMITS,
         onActivity: (activity) =>
           this.ports.game.activity(request.gameId, activity).catch((cause: unknown) => {
-            this.ports.log("activity relay failed", cause);
+            this.ports.log("activity relay failed", scrub(describeCause(cause), apiKey));
           }),
         sessionId: `${request.gameId}:${request.seat}`,
         signal: undefined,
         now: this.ports.now,
       });
 
-      this.ports.sql.exec(
-        "INSERT OR REPLACE INTO session (id, session_key, messages) VALUES (1, ?, ?)",
-        request.sessionKey,
-        encodeSession(result.messages),
+      if (this.purged) return;
+
+      this.saveConversation(
+        before,
+        result.conversation,
+        result.compaction?.compacted === true,
+        apiKey,
       );
 
       const transcript: WakeTranscript = {
@@ -186,20 +277,26 @@ export class PlayerHost {
         startedAt,
         finishedAt: new Date(this.ports.now()).toISOString(),
         reasoning: result.reasoning,
-        text:
-          result.errorMessage === null
-            ? result.text
-            : `${result.text}\n[model error] ${result.errorMessage}`.trim(),
+        text: scrub(transcriptText(result), apiKey),
         toolCalls: result.toolCalls,
         usage: result.usage,
         invalidActions: result.invalidActions,
         timedOut: result.timedOut,
       };
 
-      await this.report(request, transcript, result.latencyMs, result.endReason);
+      await this.report(
+        request,
+        transcript,
+        result.latencyMs,
+        result.endReason,
+        result.compaction?.compacted === true ? 1 : 0,
+      );
     } catch (cause) {
-      this.ports.log(`wake ${request.gameId}/${request.seat}/${request.decisionId} failed`, cause);
-      await this.report(request, { ...this.emptyTranscript(request), startedAt }, 0, "failed");
+      this.ports.log(
+        `wake ${request.gameId}/${request.seat}/${request.decisionId} failed`,
+        scrub(describeCause(cause), apiKey),
+      );
+      await this.report(request, { ...this.emptyTranscript(request), startedAt }, 0, "failed", 0);
     }
   }
 
@@ -228,7 +325,10 @@ export class PlayerHost {
     transcript: WakeTranscript,
     latencyMs: number,
     endReason: WakeEndReason | "interrupted" | "expired" | "failed",
+    compactions: number,
   ): Promise<void> {
+    if (this.purged) return;
+
     const report: WakeReport = {
       gameId: request.gameId,
       seat: request.seat,
@@ -236,6 +336,7 @@ export class PlayerHost {
       transcript,
       latencyMs,
       endReason,
+      compactions,
     };
 
     this.ports.sql.exec(

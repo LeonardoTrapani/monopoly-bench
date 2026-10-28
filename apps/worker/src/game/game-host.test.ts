@@ -188,6 +188,7 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
     lastWake,
     hooks,
     alarmsRun: () => alarmsRun,
+    pendingAlarm: () => alarm,
   };
 };
 
@@ -218,6 +219,7 @@ const report = (request: WakeRequest, endReason = "unanswered") => ({
   transcript: transcriptFor(request),
   latencyMs: 5000,
   endReason,
+  compactions: 0,
 });
 
 describe("GameHost with the real engine", () => {
@@ -573,5 +575,44 @@ describe("GameHost with the real engine", () => {
 
     expect(h.host.status()).toBe("aborted");
     expect(h.finishes[0]?.endReason).toBe("aborted");
+  });
+
+  it("forgets a purged game: nothing stored, no alarm, late reports and calls write nothing", async () => {
+    const h = setup([llm("Opus"), llm("Sol")]);
+
+    await h.host.start(h.start);
+    await h.drain();
+
+    const wake = h.lastWake();
+
+    await h.host.submit(h.call(wake, "c1", "note", { text: "Keep oranges." }));
+    await h.host.purge();
+
+    const tables = h.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table'");
+
+    for (const table of tables) {
+      expect(h.sql.exec(`SELECT * FROM ${String(table["name"])}`)).toEqual([]);
+    }
+
+    expect(h.pendingAlarm()).toBeNull();
+
+    // A wake still in flight reports and calls after the deletion: nothing is written.
+    await h.host.wakeFinished(report(wake, "answered"));
+
+    expect(await h.host.done(h.call(wake, "c2", "done"))).toMatchObject({
+      ok: false,
+      terminal: true,
+    });
+
+    await h.host.alarm();
+    await h.drain();
+
+    expect(h.wakeRows).toHaveLength(0);
+    expect(h.charges).toHaveLength(0);
+    expect(h.outcomes).toHaveLength(0);
+    expect(h.finishes).toHaveLength(0);
+    expect(h.archive.size).toBe(0);
+    expect(h.sql.exec("SELECT * FROM calls")).toEqual([]);
+    expect(h.host.status()).toBe("queued");
   });
 });

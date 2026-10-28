@@ -4,6 +4,20 @@ export type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
 export type { Api, Model } from "@earendil-works/pi-ai";
 
 export {
+  bundledCatalog,
+  catalogEntryOfListing,
+  catalogFromListings,
+  catalogLabel,
+  listingPricing,
+  listingsOfModelList,
+  modelNaming,
+  OpenRouterListing,
+  OpenRouterPricing,
+  sortCatalog,
+  supportsTools,
+} from "./catalog.ts";
+
+export {
   commandFromTool,
   type CommandTool,
   isCommandTool,
@@ -27,6 +41,23 @@ export {
   type ToolOutcome,
   type WakeLimits,
 } from "./executor.ts";
+
+export {
+  COMPACTION_PROMPT,
+  type Compaction,
+  compactConversation,
+  compactionBudget,
+  type Conversation,
+  decodeAgentMessage,
+  DEFAULT_MEMORY_LIMITS,
+  EMPTY_CONVERSATION,
+  encodeAgentMessage,
+  estimateConversationTokens,
+  MAX_CONTEXT_SHARE,
+  type MemoryLimits,
+  messageChars,
+  needsCompaction,
+} from "./memory.ts";
 
 export {
   OPENROUTER_BASE_URL,
@@ -54,13 +85,12 @@ export {
 
 export {
   runWake,
+  transcriptText,
   type WakeEndReason,
   type WakeIdentity,
   type WakeInput,
   type WakeResult,
 } from "./run-wake.ts";
-
-export { decodeSession, encodeSession } from "./session.ts";
 
 export {
   ANSWERING_TOOLS,
@@ -76,6 +106,8 @@ export {
   toolParameters,
   type ToolParameters,
 } from "./tools.ts";
+
+export { addResponseUsage, EMPTY_USAGE, sumUsage } from "./usage.ts";
 
 export {
   MAX_DIGEST_LINES,

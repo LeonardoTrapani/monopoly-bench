@@ -1,14 +1,9 @@
 /**
  * Seats for `mb sim`: bot policies and LLM seats, from `--seats heuristic,llm:<openrouter id>`
- * or `--bots …` plus `--llm <id>[,<id>]`.
+ * or `--bots …` plus `--llm <id>[,<id>]`. LLM seats are labelled with pi-ai's model names.
  */
-import {
-  competitorId,
-  competitorLabel,
-  defaultModelCatalog,
-  LlmSeat,
-  type Reasoning,
-} from "@mb/api";
+import { catalogLabel } from "@mb/agent";
+import { competitorId, competitorLabel, featuredModels, LlmSeat, type Reasoning } from "@mb/api";
 import { BOT_POLICIES, isBotPolicy } from "@mb/bots";
 import { SEATS, type SeatConfig } from "@mb/engine";
 
@@ -31,9 +26,7 @@ const llmSeat = (
   reasoning: Reasoning | undefined,
   maxOutputTokens: number | undefined,
 ) => {
-  const label = defaultModelCatalog.find((entry) => entry.model === model)?.label ?? model;
-
-  const base = LlmSeat.make({ model, label });
+  const base = LlmSeat.make({ model, label: catalogLabel(model) });
 
   const reasoned =
     reasoning === undefined || reasoning === "off" ? base : LlmSeat.make({ ...base, reasoning });
@@ -56,8 +49,11 @@ export const parseSeatList = (raw: string, options: LlmOptions): ReadonlyArray<S
       if (entry.startsWith("llm:")) {
         const model = entry.slice("llm:".length);
 
-        if (model.length === 0)
-          throw new Error(`"${entry}" needs an OpenRouter model id after llm:`);
+        if (model.length === 0) {
+          throw new Error(
+            `"${entry}" needs an OpenRouter model id after llm:, e.g. one of the featured models: ${featuredModels.join(", ")}`,
+          );
+        }
 
         return { kind: "llm", spec: llmSeat(model, options.reasoning, options.maxOutputTokens) };
       }

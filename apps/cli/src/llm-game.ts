@@ -5,14 +5,18 @@
  * refusal. Built on `@mb/sim`'s `Host` (digest cursors, defaults, invariants).
  */
 import {
-  type AgentMessage,
   type Api,
   buildSystemPrompt,
+  type Conversation,
+  DEFAULT_MEMORY_LIMITS,
+  EMPTY_CONVERSATION,
   engineExecutor,
+  type MemoryLimits,
   type Model,
   renderWakeMessage,
   runWake,
   type StreamFn,
+  transcriptText,
   type WakeResult,
   wakeLimitsOf,
 } from "@mb/agent";
@@ -63,6 +67,8 @@ export interface MixedGameInput {
   readonly verify?: boolean;
   readonly onWake?: (transcript: WakeTranscript, result: WakeResult) => void;
   readonly now?: () => number;
+  /** Conversation budget of every LLM seat (default `DEFAULT_MEMORY_LIMITS`, as in PlayerDO). */
+  readonly memory?: MemoryLimits;
 }
 
 export interface MixedGameResult {
@@ -71,11 +77,6 @@ export interface MixedGameResult {
   readonly transcripts: ReadonlyArray<WakeTranscript>;
   readonly spentUsd: number;
   readonly budgetExhausted: boolean;
-}
-
-interface Session {
-  readonly key: string;
-  readonly messages: ReadonlyArray<AgentMessage>;
 }
 
 const emptyStats = (seat: Seat): LlmSeatStats => ({
@@ -101,7 +102,8 @@ export const runMixedGame = async (input: MixedGameInput): Promise<MixedGameResu
   const bots = new Map<Seat, ReturnType<typeof createBot>>();
   const stats = new Map<Seat, LlmSeatStats>();
   const notes = new Map<Seat, string>();
-  const sessions = new Map<Seat, Session>();
+  /** Each LLM seat's conversation for the whole game, in memory (SPEC §6.2). */
+  const conversations = new Map<Seat, Conversation>();
   const transcripts: Array<WakeTranscript> = [];
   const abort = new AbortController();
   let spentUsd = 0;
@@ -144,9 +146,6 @@ export const runMixedGame = async (input: MixedGameInput): Promise<MixedGameResu
   const playLlm = async (wake: Wake, spec: LlmSeat): Promise<void> => {
     const seat = wake.request.seat;
     const seatStats = stats.get(seat) ?? emptyStats(seat);
-    const sessionKey = `frame-${wake.request.frameId}`;
-    const previous = sessions.get(seat);
-    const history = previous !== undefined && previous.key === sessionKey ? previous.messages : [];
 
     const message = renderWakeMessage({
       view: wake.view,
@@ -173,7 +172,7 @@ export const runMixedGame = async (input: MixedGameInput): Promise<MixedGameResu
       reasoning: spec.reasoning,
       maxOutputTokens: spec.maxOutputTokens,
       systemPrompt,
-      history,
+      conversation: conversations.get(seat) ?? EMPTY_CONVERSATION,
       message,
       executor: engineExecutor(
         {
@@ -188,13 +187,14 @@ export const runMixedGame = async (input: MixedGameInput): Promise<MixedGameResu
         wake.request.decisionId,
       ),
       limits: wakeLimitsOf(rules),
+      memory: input.memory ?? DEFAULT_MEMORY_LIMITS,
       onActivity: () => {},
       sessionId: `${input.config.gameId}:${seat}`,
       signal: abort.signal,
       now,
     });
 
-    sessions.set(seat, { key: sessionKey, messages: result.messages });
+    conversations.set(seat, result.conversation);
     seatStats.wakes += 1;
     seatStats.toolCalls += result.toolCalls.length;
     seatStats.invalid += result.invalidActions;
@@ -217,10 +217,7 @@ export const runMixedGame = async (input: MixedGameInput): Promise<MixedGameResu
       finishedAt: new Date(now()).toISOString(),
       prompt: message,
       reasoning: result.reasoning,
-      text:
-        result.errorMessage === null
-          ? result.text
-          : `${result.text}\n[model error] ${result.errorMessage}`.trim(),
+      text: transcriptText(result),
       toolCalls: result.toolCalls,
       usage: result.usage,
       invalidActions: result.invalidActions,

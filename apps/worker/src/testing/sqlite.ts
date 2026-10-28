@@ -3,7 +3,7 @@
  * `@effect/sql-d1` and this Worker use) and the Durable Object `SqlPort`. Tests run real SQL
  * against the real migrations.
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 
@@ -154,8 +154,15 @@ class NodeD1 implements D1Database {
   }
 }
 
+const migrationsDir = join(import.meta.dirname, "../../migrations");
+
+/** Every migration, in file name order (as Alchemy applies them). */
 const migrationsSql = (): string =>
-  readFileSync(join(import.meta.dirname, "../../migrations/0001_init.sql"), "utf8");
+  readdirSync(migrationsDir)
+    .filter((name) => name.endsWith(".sql"))
+    .sort()
+    .map((name) => readFileSync(join(migrationsDir, name), "utf8"))
+    .join("\n");
 
 export const memoryD1 = () => {
   const db = new DatabaseSync(":memory:");

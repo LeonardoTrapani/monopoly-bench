@@ -91,3 +91,106 @@ export const rateGame = (
     };
   });
 };
+
+/** One seat of a finished game, as ratings read it. */
+export interface RatedSeat {
+  readonly competitorId: string;
+  readonly label: string;
+  readonly kind: "llm" | "bot";
+  /** Null when the seat has no final rank. */
+  readonly rank: number | null;
+}
+
+export interface RatedGame {
+  readonly gameId: string;
+  /** When the game finished: its place in the replay and its rating history entries. */
+  readonly at: string;
+  readonly seats: ReadonlyArray<RatedSeat>;
+}
+
+/** The rating table row of one competitor. */
+export interface CompetitorRating extends Skill {
+  readonly competitorId: string;
+  readonly label: string;
+  readonly kind: "llm" | "bot";
+  readonly score: number;
+  readonly games: number;
+  readonly wins: number;
+  readonly updatedAt: string;
+}
+
+export interface RatingHistoryEntry extends Skill {
+  readonly competitorId: string;
+  readonly gameId: string;
+  readonly at: string;
+  readonly score: number;
+}
+
+export interface RatingTable {
+  readonly ratings: ReadonlyArray<CompetitorRating>;
+  readonly history: ReadonlyArray<RatingHistoryEntry>;
+}
+
+/**
+ * Public ratings count games of LLM seats only (SPEC §8): a game with a bot seat, or with fewer
+ * than two ranked seats, leaves the table unchanged.
+ */
+export const isRatedGame = (seats: ReadonlyArray<RatedSeat>): boolean =>
+  seats.every((seat) => seat.kind === "llm") &&
+  seats.filter((seat) => seat.rank !== null).length >= 2;
+
+/**
+ * Rates `table` updated by one game: `rateGame` from the table's priors, games and wins counted.
+ * The incremental update after a game and the replay after a deletion both use it.
+ */
+export const applyGame = (
+  priors: ReadonlyMap<string, CompetitorRating>,
+  game: RatedGame,
+): ReadonlyArray<CompetitorRating> => {
+  const placements = game.seats.flatMap((seat) =>
+    seat.rank === null ? [] : [{ competitorId: seat.competitorId, rank: seat.rank }],
+  );
+
+  const identity = new Map(game.seats.map((seat) => [seat.competitorId, seat]));
+
+  return rateGame(placements, priors).map((rated) => {
+    const prior = priors.get(rated.competitorId);
+    const seat = identity.get(rated.competitorId);
+
+    return {
+      competitorId: rated.competitorId,
+      label: seat?.label ?? rated.competitorId,
+      kind: seat?.kind ?? "llm",
+      mu: rated.mu,
+      sigma: rated.sigma,
+      score: rated.score,
+      games: (prior?.games ?? 0) + 1,
+      wins: (prior?.wins ?? 0) + (rated.won ? 1 : 0),
+      updatedAt: game.at,
+    };
+  });
+};
+
+/** Replays rated games in order from the default prior: the table they produce. */
+export const replayRatings = (games: ReadonlyArray<RatedGame>): RatingTable => {
+  const ratings = new Map<string, CompetitorRating>();
+  const history: Array<RatingHistoryEntry> = [];
+
+  for (const game of games) {
+    if (!isRatedGame(game.seats)) continue;
+
+    for (const rated of applyGame(ratings, game)) {
+      ratings.set(rated.competitorId, rated);
+      history.push({
+        competitorId: rated.competitorId,
+        gameId: game.gameId,
+        at: game.at,
+        mu: rated.mu,
+        sigma: rated.sigma,
+        score: rated.score,
+      });
+    }
+  }
+
+  return { ratings: [...ratings.values()], history };
+};

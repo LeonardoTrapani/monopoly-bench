@@ -195,7 +195,6 @@ const toDecision = (request: {
   readonly seat: Seat;
   readonly decisionId: string;
   readonly frame: string;
-  readonly frameId: number;
   readonly round: number;
   readonly reasons: ReadonlyArray<string>;
 }): PendingDecision => ({
@@ -204,8 +203,6 @@ const toDecision = (request: {
   frame: request.frame,
   round: request.round,
   reasons: request.reasons,
-  // Rounds of one frame (a table, an auction, a debt) form one session.
-  sessionKey: `frame-${request.frameId}`,
 });
 
 const requestFor = (state: GameState, decision: PendingDecision) => {

@@ -60,7 +60,7 @@ export const buildSystemPrompt = (rules: RulesConfig, playersCount: number): str
     `- Per round you may post at most ${rules.maxOffersPerRound} new offers and ${rules.maxMessagesPerRound} messages; comments have at most ${rules.commentMaxChars} characters.`,
     "- Auctions also run in rounds of sealed bids: every bidder still in who is not leading is woken each round, until a round with no raise.",
     "- Raising funds (debt) also runs in rounds: the debtor is woken every round; others are woken by the usual wake reasons and may trade with the debtor.",
-    "- Inside one session (the rounds of one table, auction or debt) the conversation continues. When a new decision starts your context is reset: you only keep your notes. Use the note tool to remember plans, promises and reads on other players.",
+    "- Your conversation lasts the whole game: every wake adds its message to it. When it grows long, its older part is replaced by a summary that you write, and your most recent wakes stay word for word. Your notes are shown in every wake message and are never summarized: use the note tool for plans, promises and reads on other players that you must not lose.",
     "",
     "# Talking and trading",
     "Text exists only as comments on offers and messages in offer threads. It is public and never binding: only offer terms are enforced. As in the official rules, there are no loans, no promises of future payments and no rent immunity deals.",

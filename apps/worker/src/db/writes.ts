@@ -3,13 +3,24 @@
  * one row per wake, and the final summary with offers and auctions. Every write is idempotent
  * (`INSERT OR IGNORE`, upserts, guarded updates), so retries are safe.
  */
-import { type GameStatus, RunConfig, type RunStatus, type Seat, SeatSpec } from "@mb/api";
+import {
+  type GameStatus,
+  RunConfig,
+  type RunFunding,
+  type RunStatus,
+  type Seat,
+  SeatSpec,
+} from "@mb/api";
 import { Effect, Schema } from "effect";
 import { SqlClient } from "effect/sql";
 
 import type { EndReason, Json } from "../game/engine.ts";
 import type { PlannedGame } from "../runs/expand.ts";
-import { batchAll, chunk, D1_MAX_PARAMS } from "./sql.ts";
+import { batchAll, chunk, D1_MAX_PARAMS, decodeRows } from "./sql.ts";
+
+const PlayersCountRow = Schema.Struct({ players_count: Schema.Int });
+
+const IdRow = Schema.Struct({ id: Schema.String });
 
 const encodeConfig = Schema.encodeSync(Schema.fromJsonString(RunConfig));
 
@@ -24,6 +35,7 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Json));
 export interface NewRun {
   readonly id: string;
   readonly createdAt: string;
+  readonly funding: RunFunding;
   readonly config: RunConfig;
   readonly games: ReadonlyArray<PlannedGame>;
 }
@@ -37,6 +49,7 @@ export const insertRun = Effect.fn("insertRun")(function* (run: NewRun) {
     created_at: run.createdAt,
     finished_at: null,
     status: "running",
+    funding: run.funding,
     players_count: run.config.players.length,
     config_json: encodeConfig(run.config),
     seats_json: encodeSeats(run.config.players),
@@ -144,6 +157,7 @@ export interface WakeRow {
   readonly invalidActions: number;
   readonly timedOut: boolean;
   readonly endReason: string;
+  readonly compactions: number;
 }
 
 export const recordWake = Effect.fn("recordWake")(function* (wake: WakeRow) {
@@ -168,9 +182,56 @@ export const recordWake = Effect.fn("recordWake")(function* (wake: WakeRow) {
     invalid_actions: wake.invalidActions,
     timed_out: wake.timedOut ? 1 : 0,
     end_reason: wake.endReason,
+    compactions: wake.compactions,
   };
 
   yield* sql`INSERT OR REPLACE INTO wakes ${sql.insert(row)}`;
+});
+
+/** The player count of a run, or null when D1 has no such run. */
+export const runPlayersCount = Effect.fn("runPlayersCount")(function* (runId: string) {
+  const sql = yield* SqlClient.SqlClient;
+
+  const [row] = yield* decodeRows(PlayersCountRow)(
+    sql`SELECT players_count FROM runs WHERE id = ${runId}`,
+  );
+
+  return row?.players_count ?? null;
+});
+
+export const runGameIds = Effect.fn("runGameIds")(function* (runId: string) {
+  const sql = yield* SqlClient.SqlClient;
+
+  const rows = yield* decodeRows(IdRow)(
+    sql`SELECT id FROM games WHERE run_id = ${runId} ORDER BY game_index`,
+  );
+
+  return rows.map((row) => row.id);
+});
+
+/**
+ * Deletes everything D1 holds about a run's games (wakes, offers, auctions, seats, rating
+ * history, games) in one batch. The `runs` row stays until `deleteRunRow`, after the ratings are
+ * recomputed, so an interrupted deletion can be retried.
+ */
+export const deleteRunGames = Effect.fn("deleteRunGames")(function* (runId: string) {
+  const sql = yield* SqlClient.SqlClient;
+  const games = sql`SELECT id FROM games WHERE run_id = ${runId}`;
+
+  yield* batchAll([
+    sql`DELETE FROM wakes WHERE game_id IN (${games})`,
+    sql`DELETE FROM offers WHERE game_id IN (${games})`,
+    sql`DELETE FROM auctions WHERE game_id IN (${games})`,
+    sql`DELETE FROM rating_history WHERE game_id IN (${games})`,
+    sql`DELETE FROM seats WHERE game_id IN (${games})`,
+    sql`DELETE FROM games WHERE run_id = ${runId}`,
+  ]);
+});
+
+export const deleteRunRow = Effect.fn("deleteRunRow")(function* (runId: string) {
+  const sql = yield* SqlClient.SqlClient;
+
+  yield* sql`DELETE FROM runs WHERE id = ${runId}`;
 });
 
 export interface FinishedSeat {

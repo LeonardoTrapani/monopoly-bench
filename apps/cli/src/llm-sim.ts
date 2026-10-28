@@ -6,8 +6,9 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  listingsOfModelList,
   OPENROUTER_MODELS_URL,
-  type OpenRouterModel,
+  type OpenRouterListing,
   openRouterModels,
   resolveOpenRouterModel,
 } from "@mb/agent";
@@ -23,27 +24,8 @@ import { ruleOverrides, writeGameFiles } from "./sim.ts";
 
 const encodeTranscript = Schema.encodeSync(Schema.fromJsonString(WakeTranscript));
 
-const ModelList = Schema.Struct({
-  data: Schema.Array(
-    Schema.Struct({
-      id: Schema.String,
-      context_length: Schema.optionalKey(Schema.NullOr(Schema.Number)),
-      pricing: Schema.optionalKey(
-        Schema.Struct({
-          prompt: Schema.optionalKey(Schema.String),
-          completion: Schema.optionalKey(Schema.String),
-          input_cache_read: Schema.optionalKey(Schema.String),
-          input_cache_write: Schema.optionalKey(Schema.String),
-        }),
-      ),
-    }),
-  ),
-});
-
-const decodeModelList = Schema.decodeUnknownPromise(ModelList);
-
 /** Prices from OpenRouter's public model list (no key); empty when unreachable. */
-const fetchListings = async (): Promise<ReadonlyMap<string, OpenRouterModel>> => {
+const fetchListings = async (): Promise<ReadonlyMap<string, OpenRouterListing>> => {
   try {
     const response = await fetch(OPENROUTER_MODELS_URL, {
       headers: { accept: "application/json" },
@@ -51,9 +33,9 @@ const fetchListings = async (): Promise<ReadonlyMap<string, OpenRouterModel>> =>
 
     if (!response.ok) return new Map();
 
-    const list = await decodeModelList(await response.json());
-
-    return new Map(list.data.map((entry) => [entry.id, entry]));
+    return new Map(
+      listingsOfModelList(await response.text()).map((entry) => [entry.id, entry] as const),
+    );
   } catch {
     return new Map();
   }
@@ -183,7 +165,7 @@ export const runLlmSim = async (flags: ParsedFlags): Promise<number> => {
     }),
     onWake: (transcript, wake) => {
       console.log(
-        `  ${transcript.seat} turn ${transcript.turn} ${transcript.frame} r${transcript.round}: ${wake.endReason}, ${wake.toolCalls.length} calls, ${usd(wake.usage.costUsd)}${wake.errorMessage === null ? "" : ` (${wake.errorMessage})`}`,
+        `  ${transcript.seat} turn ${transcript.turn} ${transcript.frame} r${transcript.round}: ${wake.endReason}, ${wake.toolCalls.length} calls, ${usd(wake.usage.costUsd)}${wake.compaction?.compacted === true ? ", memory compacted" : ""}${wake.errorMessage === null ? "" : ` (${wake.errorMessage})`}`,
       );
     },
   });
