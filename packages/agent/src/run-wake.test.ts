@@ -190,6 +190,61 @@ describe("runWake", () => {
     expect(h.faux.state.callCount).toBe(2);
   });
 
+  it("stops the batch as soon as the invalid limit is reached (F6)", async () => {
+    const illegal = () => fauxToolCall("mortgage", { property: "Boardwalk" });
+
+    const h = harness([
+      toolUse(...Array.from({ length: 7 }, illegal), fauxToolCall("done", {})),
+      toolUse(fauxToolCall("done", {})),
+    ]);
+
+    const result = await runWake(h.input({}));
+
+    expect(result.endReason).toBe("invalidLimit");
+    expect(result.answered).toBe(false);
+    expect(result.invalidActions).toBe(6);
+    expect(h.calls.map((call) => call.name)).toEqual(Array.from({ length: 6 }, () => "mortgage"));
+    expect(h.faux.state.callCount).toBe(1);
+  });
+
+  it("does not count calls made after the invalid limit, unknown tools included (F6)", async () => {
+    const unknown = () => fauxToolCall("teleport", { to: "GO" });
+    const h = harness([toolUse(...Array.from({ length: 8 }, unknown), fauxToolCall("done", {}))]);
+
+    const result = await runWake(h.input({}));
+
+    expect(result.endReason).toBe("invalidLimit");
+    expect(result.invalidActions).toBe(6);
+    expect(h.calls).toHaveLength(0);
+  });
+
+  it("stops at a terminal refusal without more requests or invalid actions (F5)", async () => {
+    const closed: ToolExecutor = async () => ({
+      ok: false,
+      message: "This decision is closed.",
+      terminal: true,
+    });
+
+    const h = harness([
+      toolUse(fauxToolCall("done", {}), fauxToolCall("note", { text: "x" })),
+      toolUse(fauxToolCall("done", {})),
+      toolUse(fauxToolCall("done", {})),
+    ]);
+
+    const result = await runWake(h.input({ executor: closed }));
+
+    expect(result.endReason).toBe("closed");
+    expect(result.answered).toBe(false);
+    expect(result.invalidActions).toBe(0);
+    expect(h.faux.state.callCount).toBe(1);
+    expect(result.toolCalls[0]).toMatchObject({
+      name: "done",
+      ok: false,
+      result: "This decision is closed.",
+    });
+    expect(result.toolCalls[1]?.ok).toBe(false);
+  });
+
   it("stops at maxToolCallsPerWake and blocks calls over the limit", async () => {
     const inspect = () => fauxToolCall("inspect", { topic: "table" });
 

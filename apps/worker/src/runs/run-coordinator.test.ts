@@ -18,7 +18,9 @@ const setup = () => {
   const abortedQueued: Array<string> = [];
   const rated: Array<GameRatingInput> = [];
   const runUpdates: Array<string> = [];
+  const alarms: Array<number | null> = [];
   let failStarts = 0;
+  let failRatings = 0;
 
   const coordinator = new RunCoordinator({
     sql: memorySqlPort(),
@@ -31,6 +33,11 @@ const setup = () => {
         abortedQueued.push(...ids);
       },
       applyRatings: async (input) => {
+        if (failRatings > 0) {
+          failRatings -= 1;
+          throw new Error("D1 unavailable");
+        }
+
         rated.push(input);
       },
     },
@@ -47,7 +54,9 @@ const setup = () => {
         aborted.push(gameId);
       },
     },
-    setAlarm: async () => {},
+    setAlarm: async (at) => {
+      alarms.push(at);
+    },
     now: () => Date.parse("2026-10-28T10:00:00.000Z"),
     log: () => {},
   });
@@ -74,8 +83,12 @@ const setup = () => {
     rated,
     runUpdates,
     finish,
+    alarms,
     failNextStarts: (count: number) => {
       failStarts = count;
+    },
+    failNextRatings: (count: number) => {
+      failRatings = count;
     },
   };
 };
@@ -228,5 +241,44 @@ describe("RunCoordinator", () => {
     await h.coordinator.alarm();
 
     expect(h.started.map((start) => start.gameId)).toEqual(["r1-0-1", "r1-0-0"]);
+  });
+
+  it("keeps retrying a failed rating after the run finished (F3)", async () => {
+    const h = setup();
+
+    await h.coordinator.create("r1", config({ seeds: 1 }), []);
+    h.failNextRatings(1);
+
+    for (const start of h.started.slice()) await h.coordinator.gameFinished(h.finish(start));
+
+    expect(h.coordinator.summary()?.status).toBe("finished");
+    expect(h.rated.map((input) => input.gameId)).toEqual(["r1-0-1"]);
+    expect(h.alarms.at(-1)).not.toBeNull();
+
+    await h.coordinator.alarm();
+
+    expect(h.rated.map((input) => input.gameId).sort()).toEqual(["r1-0-0", "r1-0-1"]);
+    expect(h.alarms.at(-1)).toBeNull();
+  });
+
+  it("keeps retrying a failed rating after the run was cancelled (F3)", async () => {
+    const h = setup();
+
+    await h.coordinator.create("r1", config({ seeds: 1 }), []);
+    h.failNextRatings(1);
+
+    const first = h.started[0];
+
+    if (first === undefined) throw new Error("not started");
+
+    // A game that was already ending when the run was cancelled.
+    await h.coordinator.cancel();
+    await h.coordinator.gameFinished(h.finish(first));
+
+    expect(h.alarms.at(-1)).not.toBeNull();
+
+    await h.coordinator.alarm();
+
+    expect(h.rated.map((input) => input.gameId)).toEqual(["r1-0-0"]);
   });
 });

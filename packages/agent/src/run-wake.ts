@@ -74,6 +74,8 @@ export interface WakeInput {
 
 export type WakeEndReason =
   | "answered"
+  /** The host refused a call as terminal (decision closed, game over): nothing left to do. */
+  | "closed"
   | "toolLimit"
   | "invalidLimit"
   | "timeout"
@@ -126,13 +128,38 @@ class WakeLedger {
   reasoning: Array<string> = [];
   text: Array<string> = [];
   toolCalls: Array<ToolCallRecord> = [];
-  /** Calls blocked after the answer or over the call limit: errors, not invalid actions. */
-  ignoredCalls = new Set<string>();
+  /** The host refused a call as terminal: the wake is over. */
+  closed = false;
+  /**
+   * Calls that started once the wake was over (answered, closed, invalid limit reached) or
+   * over the call limit, with the reason they are refused: errors, not invalid actions.
+   */
+  ignoredCalls = new Map<string, string>();
+  /** Terminal refusals: errors the model sees, not invalid actions. */
+  terminalRefusals = new Set<string>();
   /** Calls whose host transport failed: errors, not invalid actions. */
   hostFailures = new Set<string>();
   lastAssistant: AssistantMessage | undefined = undefined;
 
   constructor(readonly limits: WakeLimits) {}
+
+  /** Why a call starting now must not run, if it must not. */
+  blockReason(): string | undefined {
+    if (this.answered)
+      return "The decision was already answered in this wake; this call was ignored.";
+
+    if (this.closed) return "The decision is closed; this call was ignored.";
+
+    if (this.invalidActions >= this.limits.maxInvalidPerWake) {
+      return `The limit of ${this.limits.maxInvalidPerWake} invalid calls per wake was reached; this call was ignored.`;
+    }
+
+    if (this.toolCallsStarted > this.limits.maxToolCallsPerWake) {
+      return `The limit of ${this.limits.maxToolCallsPerWake} tool calls per wake was reached; this call was ignored.`;
+    }
+
+    return undefined;
+  }
 
   limitReached(): WakeEndReason | undefined {
     if (this.invalidActions >= this.limits.maxInvalidPerWake) return "invalidLimit";
@@ -200,7 +227,14 @@ const makeTool = <N extends ToolName>(
       );
     });
 
-    if (!outcome.ok) throw new Error(outcome.message);
+    if (!outcome.ok) {
+      if (outcome.terminal) {
+        ledger.closed = true;
+        ledger.terminalRefusals.add(toolCallId);
+      }
+
+      throw new Error(outcome.message);
+    }
 
     if (outcome.terminal) ledger.answered = true;
 
@@ -228,7 +262,9 @@ const recordToolEnd = async (
   ledger.toolCalls.push(record);
 
   const excused =
-    ledger.ignoredCalls.has(event.toolCallId) || ledger.hostFailures.has(event.toolCallId);
+    ledger.ignoredCalls.has(event.toolCallId) ||
+    ledger.hostFailures.has(event.toolCallId) ||
+    ledger.terminalRefusals.has(event.toolCallId);
 
   if (event.isError && !excused) ledger.invalidActions += 1;
 
@@ -255,6 +291,8 @@ const recordAssistant = (message: AssistantMessage, ledger: WakeLedger): void =>
 
 const endReasonOf = (ledger: WakeLedger, externallyAborted: boolean): WakeEndReason => {
   if (ledger.answered) return "answered";
+
+  if (ledger.closed) return "closed";
 
   if (ledger.timedOut) return "timeout";
 
@@ -298,30 +336,14 @@ export const runWake = async (input: WakeInput): Promise<WakeResult> => {
     toolExecution: "sequential",
     identity: { attribution: null },
     beforeToolCall: async ({ toolCall }) => {
-      if (ledger.answered) {
-        ledger.ignoredCalls.add(toolCall.id);
+      const reason = ledger.ignoredCalls.get(toolCall.id);
 
-        return {
-          block: true,
-          reason: "The decision was already answered in this wake; this call was ignored.",
-          terminate: true,
-        };
-      }
-
-      if (ledger.toolCallsStarted > input.limits.maxToolCallsPerWake) {
-        ledger.ignoredCalls.add(toolCall.id);
-
-        return {
-          block: true,
-          reason: `The limit of ${input.limits.maxToolCallsPerWake} tool calls per wake was reached; this call was ignored.`,
-          terminate: true,
-        };
-      }
-
-      return undefined;
+      return reason === undefined ? undefined : { block: true, reason, terminate: true };
     },
     finishTurn: () =>
-      ledger.answered || ledger.limitReached() !== undefined ? { action: "end" } : undefined,
+      ledger.answered || ledger.closed || ledger.limitReached() !== undefined
+        ? { action: "end" }
+        : undefined,
   });
 
   if (input.sessionId !== undefined) agent.sessionId = input.sessionId;
@@ -329,6 +351,12 @@ export const runWake = async (input: WakeInput): Promise<WakeResult> => {
   agent.subscribe(async (event) => {
     if (event.type === "tool_execution_start") {
       ledger.toolCallsStarted += 1;
+
+      // Decided at start, so calls that never reach `beforeToolCall` (unknown tool, bad
+      // arguments) are not counted as invalid once the wake is over.
+      const blocked = ledger.blockReason();
+
+      if (blocked !== undefined) ledger.ignoredCalls.set(event.toolCallId, blocked);
       argsByCall.set(event.toolCallId, JSON.stringify(event.args ?? {}));
       await reasoningStream.flush();
 
@@ -379,6 +407,7 @@ export const runWake = async (input: WakeInput): Promise<WakeResult> => {
     // within the limits, in the same conversation.
     while (
       !ledger.answered &&
+      !ledger.closed &&
       !ledger.timedOut &&
       input.signal?.aborted !== true &&
       ledger.lastAssistant?.stopReason !== "error" &&

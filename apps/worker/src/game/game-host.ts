@@ -269,7 +269,9 @@ export class GameHost<S, E extends EngineEvent, C> {
 
     const { transcript } = report;
 
-    await this.recordWake({
+    // Accounting must succeed before the report counts as processed: a failure throws, the
+    // decision stays unreported and PlayerDO retries the report (both writes are idempotent).
+    await this.ports.db.recordWake({
       gameId: game.gameId,
       seat: report.seat,
       decisionId: report.decisionId,
@@ -291,17 +293,23 @@ export class GameHost<S, E extends EngineEvent, C> {
       endReason: report.endReason,
     });
 
-    try {
-      const charged = await this.ports.run.charge(
-        game.runId,
-        game.gameId,
-        `${game.gameId}:${report.seat}:${report.decisionId}`,
-        transcript.usage.costUsd,
-      );
+    const charged = await this.ports.run.charge(
+      game.runId,
+      game.gameId,
+      `${game.gameId}:${report.seat}:${report.decisionId}`,
+      transcript.usage.costUsd,
+    );
 
-      if (charged.exhausted) this.setMeta("budgetExhausted", "1");
-    } catch (cause) {
-      this.ports.log(`RunDO charge failed for ${game.gameId}`, cause);
+    if (charged.exhausted) this.setMeta("budgetExhausted", "1");
+
+    // The game was already archived (the last wake often reports after the game ends):
+    // refresh this seat's transcripts.
+    if (this.getMeta("finishedNotified") !== undefined) {
+      await this.ports.archive.put(
+        archiveKeys.seat(game.gameId, report.seat),
+        this.transcripts(report.seat),
+        "application/x-ndjson",
+      );
     }
 
     // The wake ended without answering: apply the default now instead of at the deadline.
