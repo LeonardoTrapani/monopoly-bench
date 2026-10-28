@@ -343,10 +343,21 @@ export const update = (model: Model, message: Message) =>
       const isNowLive = isLiveStatus(summary.status);
       const wasKnown = AsyncData.hasData(model.summary);
 
+      // The game ended while we were not streaming it: fetch the rest of the log and the
+      // final transcripts so the replay reaches the end.
+      const missingSince = Option.filter(
+        readyTimeline(model),
+        (timeline) => !isNowLive && timeline.replay.head.state.status !== "finished",
+      ).pipe(Option.map((timeline) => lastSeq(timeline.replay)));
+
+      const isCatchingUp = Option.isSome(missingSince);
+
       return {
         model: modifyFields(model, {
           summary: succeedWith(summary),
-          isFollowingLive: () => (wasKnown ? model.isFollowingLive && isNowLive : isNowLive),
+          transcripts: (transcripts) => (isCatchingUp ? reload(transcripts) : transcripts),
+          isFollowingLive: () =>
+            wasKnown ? model.isFollowingLive && (isNowLive || isCatchingUp) : isNowLive,
           connection: (connection) =>
             isNowLive
               ? Connection.matchOrElse(
@@ -355,6 +366,13 @@ export const update = (model: Model, message: Message) =>
                   () => connection,
                 )
               : Connection.Offline(),
+        }),
+        commands: Option.match(missingSince, {
+          onNone: () => [],
+          onSome: (since) => [
+            FetchEventsSince({ gameId: model.gameId, since }),
+            FetchTranscripts({ gameId: model.gameId }),
+          ],
         }),
       };
     },
