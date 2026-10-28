@@ -324,6 +324,34 @@ describe("viewer update", () => {
       model((next) => expect(next.connection).toEqual(Connection.Connecting({ attempt: 3 }))),
     );
   });
+
+  it("a game that ended while disconnected fetches the missing events and the transcripts", () => {
+    const partial = fromEvents(config, events.slice(0, 100));
+
+    story(
+      update,
+      given({
+        ...readyModel(0, "running"),
+        isFollowingLive: true,
+        connection: Connection.Lost({ attempt: 1, error: "closed" }),
+        timeline: Timeline.Ready({ replay: partial, cursor: 100, current: partial.head }),
+      }),
+      message(Message.SucceededFetchSummary({ summary: summary("finished") })),
+      model((next) => expect(next.connection).toEqual(Connection.Offline())),
+      Command.expectExact(
+        FetchEventsSince({ gameId: config.gameId, since: events[99]?.seq ?? 0 }),
+        FetchTranscripts({ gameId: config.gameId }),
+      ),
+      Command.resolveAll(
+        [FetchEventsSince, Message.SucceededFetchEventsSince({ events: events.slice(100) })],
+        [FetchTranscripts, Message.SucceededFetchTranscripts({ transcripts: [] })],
+      ),
+      model((next) => {
+        expect(timelineOf(next).replay.head.state).toEqual(replay(config, events));
+        expect(next.transcripts._tag).toBe("Success");
+      }),
+    );
+  });
 });
 
 describe("viewer view", () => {
