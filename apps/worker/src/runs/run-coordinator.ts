@@ -19,6 +19,9 @@ import { jsonColumn, queryFirst, queryRows, type SqlPort } from "../sql.ts";
 import { charge, isExhausted, mayRun } from "./budget.ts";
 import { DEFAULT_CONCURRENCY, expandRun, gameConfigOf, type PlannedGame } from "./expand.ts";
 
+/** Retry interval for a rating update that failed. */
+const RATING_RETRY_MS = 30_000;
+
 /** Re-pump interval while a run is active, in case a notification was lost. */
 export const WATCHDOG_MS = 10 * 60_000;
 
@@ -253,13 +256,7 @@ export class RunCoordinator {
   }
 
   async alarm(): Promise<void> {
-    for (const row of queryRows(
-      this.ports.sql,
-      OutcomeRow,
-      "SELECT outcome_json FROM games WHERE status = 'done' AND rated = 0 AND outcome_json IS NOT NULL",
-    )) {
-      await this.rate(decodeOutcome(row.outcome_json));
-    }
+    for (const row of this.unratedOutcomes()) await this.rate(decodeOutcome(row.outcome_json));
 
     await this.pump();
   }
@@ -297,7 +294,7 @@ export class RunCoordinator {
     const run = this.run();
 
     if (run === undefined || run.status !== "running") {
-      await this.ports.setAlarm(null);
+      await this.settleAlarm();
 
       return;
     }
@@ -345,7 +342,7 @@ export class RunCoordinator {
         this.iso(),
       );
       await this.syncD1();
-      await this.ports.setAlarm(null);
+      await this.settleAlarm();
 
       return;
     }
@@ -376,6 +373,13 @@ export class RunCoordinator {
     };
   }
 
+  /** A closed run keeps an alarm only while finished games still wait for their rating. */
+  private async settleAlarm(): Promise<void> {
+    const unrated = this.unratedOutcomes().length > 0;
+
+    await this.ports.setAlarm(unrated ? this.ports.now() + RATING_RETRY_MS : null);
+  }
+
   private async rate(outcome: GameOutcome): Promise<void> {
     if (outcome.status === "finished") {
       try {
@@ -387,7 +391,7 @@ export class RunCoordinator {
         });
       } catch (cause) {
         this.ports.log(`rating ${outcome.gameId} failed; the alarm retries`, cause);
-        await this.ports.setAlarm(this.ports.now() + 30_000);
+        await this.ports.setAlarm(this.ports.now() + RATING_RETRY_MS);
 
         return;
       }
@@ -413,6 +417,14 @@ export class RunCoordinator {
       this.ports.sql,
       RunRow,
       "SELECT run_id, created_at, status, config_json, listings_json, spent_usd, finished_at FROM run WHERE id = 1",
+    );
+  }
+
+  private unratedOutcomes() {
+    return queryRows(
+      this.ports.sql,
+      OutcomeRow,
+      "SELECT outcome_json FROM games WHERE status = 'done' AND rated = 0 AND outcome_json IS NOT NULL",
     );
   }
 

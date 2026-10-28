@@ -32,6 +32,9 @@ interface Options {
   readonly maxRounds?: number;
   readonly exhaustAfterCharge?: boolean;
   readonly stepsPerAlarm?: number;
+  /** Failures before D1 `recordWake` / RunDO `charge` start succeeding. */
+  readonly failRecordWake?: number;
+  readonly failCharge?: number;
 }
 
 const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
@@ -46,6 +49,7 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
   let alarm: number | null = null;
   let alarmsRun = 0;
   const clock = { now: 1_000_000 };
+  const failures = { recordWake: options.failRecordWake ?? 0, charge: options.failCharge ?? 0 };
 
   const host = new GameHost(
     {
@@ -54,6 +58,11 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
         markRunning: async () => {},
         progress: async () => {},
         recordWake: async (row) => {
+          if (failures.recordWake > 0) {
+            failures.recordWake -= 1;
+            throw new Error("D1 unavailable");
+          }
+
           wakeRows.push(row);
         },
         finish: async (game) => {
@@ -72,6 +81,11 @@ const setup = (specs: ReadonlyArray<SeatSpec>, options: Options = {}) => {
       },
       run: {
         charge: async (_runId, _gameId, key) => {
+          if (failures.charge > 0) {
+            failures.charge -= 1;
+            throw new Error("RunDO unavailable");
+          }
+
           charges.push(key);
 
           return { exhausted: options.exhaustAfterCharge === true };
@@ -449,6 +463,47 @@ describe("GameHost with the real engine", () => {
     expect(h.wakeRows).toHaveLength(1);
     expect(h.charges).toEqual([`g1:A:${wake.decisionId}`]);
     expect(h.lastWake().decisionId).not.toBe(wake.decisionId);
+  });
+
+  it("keeps a report unprocessed until its accounting is written, so retries record it (F2)", async () => {
+    const h = setup([llm("Opus"), random()], { failRecordWake: 1, failCharge: 1 });
+
+    await h.host.start(h.start);
+    await h.drain();
+
+    const wake = h.lastWake();
+
+    await expect(h.host.wakeFinished(report(wake))).rejects.toThrow("D1 unavailable");
+    await expect(h.host.wakeFinished(report(wake))).rejects.toThrow("RunDO unavailable");
+    await h.host.wakeFinished(report(wake));
+    await h.host.wakeFinished(report(wake));
+
+    expect(new Set(h.wakeRows.map((row) => row.decisionId))).toEqual(new Set([wake.decisionId]));
+    expect(h.charges).toEqual([`g1:A:${wake.decisionId}`]);
+  });
+
+  it("refreshes a seat's archived transcripts when its report arrives after the game ended (F4)", async () => {
+    const h = setup([llm("Opus"), random()], { maxRounds: 1 });
+
+    await h.host.start(h.start);
+    await h.drain();
+
+    // Every LLM decision runs out its deadline until the turn cap ends the game.
+    for (let guard = 0; guard < 100 && h.outcomes.length === 0; guard += 1) {
+      h.clock.now = h.lastWake().deadline + 1;
+      await h.drain();
+    }
+
+    expect(h.outcomes).toHaveLength(1);
+    expect(h.archive.get(archiveKeys.seat("g1", "A"))).toBe("");
+
+    const late = h.lastWake();
+
+    await h.host.wakeFinished(report(late));
+
+    expect(h.archive.get(archiveKeys.seat("g1", "A"))).toContain(
+      `"decisionId":"${late.decisionId}"`,
+    );
   });
 
   it("aborts the game instead of waking once the budget is exhausted", async () => {
