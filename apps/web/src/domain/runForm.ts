@@ -96,7 +96,11 @@ export const findModel = (
   model: string,
 ): ModelCatalogEntry | undefined => catalog.find((entry) => entry.model === model);
 
-/** Models shown first, then every provider's models: the catalog in picker order. */
+/**
+ * Models shown first, then every provider's models: the catalog in picker order. Providers are
+ * ordered by slug, the picker's group key: OpenRouter may give one slug two provider names
+ * ("SpaceXAI" and "xAI" for x-ai), and a group split in two would repeat its keyed heading.
+ */
 export const orderCatalog = (
   catalog: ReadonlyArray<ModelCatalogEntry>,
 ): ReadonlyArray<ModelCatalogEntry> => {
@@ -112,9 +116,7 @@ export const orderCatalog = (
     if (left.featured) return featuredRank(left) - featuredRank(right);
 
     return (
-      left.provider.localeCompare(right.provider) ||
-      left.providerSlug.localeCompare(right.providerSlug) ||
-      left.label.localeCompare(right.label)
+      left.providerSlug.localeCompare(right.providerSlug) || left.label.localeCompare(right.label)
     );
   });
 };
