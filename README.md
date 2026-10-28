@@ -19,7 +19,8 @@ The design, the rule variants and the defaults are in [SPEC.md](SPEC.md).
   happen in simultaneous rounds: everyone decides on the same state, drafts are applied
   in a fixed order, and only seats affected by something new are woken again.
 - **Players**: LLM seats run a Pi agent (`packages/agent`) on OpenRouter with a fixed
-  tool set; bot seats (`packages/bots`, random and heuristic) are the baselines.
+  tool set and one conversation per game, compacted at a fixed token budget. Bots
+  (`packages/bots`) exist only for engine tests and local simulations.
 - **Runtime** (`apps/worker`): a Cloudflare Worker with one Durable Object per game, one
   per LLM seat and one per run, D1 for statistics and ratings, R2 for game archives,
   all defined with Alchemy. See [apps/worker/README.md](apps/worker/README.md).
@@ -51,9 +52,9 @@ bun run --cwd apps/web build
 bun run --cwd apps/worker dev      # http://localhost:1337, API key "dev-bench-key"
 ```
 
-Then open the site and use **Start a run**, or `POST /api/runs` with
-`Authorization: Bearer dev-bench-key`. Without `OPENROUTER_API_KEY` in the environment,
-LLM seats fall back to the default move.
+Then open the site and use **Start a run** with your own OpenRouter key, or `POST /api/runs`
+with `Authorization: Bearer dev-bench-key` to use the server's `OPENROUTER_API_KEY` (without
+it in the environment, server-funded LLM seats fall back to the default move).
 
 Deploying to Cloudflare needs an Alchemy Cloudflare profile and the `BENCH_API_KEY` and
 `OPENROUTER_API_KEY` secrets: see [apps/worker/README.md](apps/worker/README.md#deploy).
@@ -62,7 +63,7 @@ Deploying to Cloudflare needs an Alchemy Cloudflare profile and the `BENCH_API_K
 
 ```
 packages/engine   rules, schemas, views, wake rules
-packages/bots     random and heuristic policies
+packages/bots     random and heuristic policies (tests and local sims only)
 packages/sim      in-process host, property tests, viewer fixtures
 packages/agent    Pi harness: prompt, wake message, tools, limits, usage
 packages/api      HTTP and WebSocket contract shared by worker, web and CLI

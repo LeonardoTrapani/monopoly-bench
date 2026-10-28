@@ -23,7 +23,8 @@ code and this document disagree, fix one of them in the same change.
 - Runs of many games with seat rotation, per-format ratings (2–6 players), and rich
   statistics in a SQL database.
 - A public, Monopoly-branded web app: leaderboard, live games, replays, model pages,
-  and a form to start runs (API key required).
+  and a form to start runs, paid with the creator's own OpenRouter key or, with the
+  bench API key, with the server's credit.
 - Everything deployable to Cloudflare with Alchemy.
 
 **Non-goals (for now)**
@@ -51,7 +52,7 @@ code and this document disagree, fix one of them in the same change.
 ```
 packages/
   engine/   pure rules engine: data, schemas, decide/evolve, views, valuation, wake rules
-  bots/     scripted policies (random, heuristic) used for tests, simulations, baselines
+  bots/     scripted policies (random, heuristic) for engine tests and local simulations
   agent/    Pi harness: system prompt, wake message rendering, tools, turn runner, usage
   sim/      in-process game host (bots and/or LLM seats) used by tests and the CLI
 apps/
@@ -620,9 +621,11 @@ untouched data reproduces the table exactly).
 ## 9. Web app (`apps/web`, Foldkit)
 
 Monopoly-branded (red wordmark banner, board-green surfaces, property colors, deed-card
-styling) and inspired by the big benchmark sites (LMArena-style leaderboard table,
-Artificial-Analysis-style "rating vs cost" scatter, Kaggle-Game-Arena-style game viewer).
-No Hasbro artwork: the board is drawn in SVG by us.
+styling), light theme only, and inspired by the big benchmark sites (LMArena-style
+leaderboard table, Artificial-Analysis-style "rating vs cost" scatter, Kaggle-Game-Arena-style
+game viewer). No Hasbro artwork: the board is drawn in SVG by us. Every model name carries
+its provider icon (`@lobehub/icons-static-svg`, MIT, self-hosted; initials badge for unknown
+providers).
 
 Routes:
 
@@ -635,8 +638,12 @@ Routes:
   the same engine (`replay`) in the browser.
 - `/models/:id` — rating, stats, behavior (trades proposed/accepted, auction premium vs
   list price, bankruptcies), recent games.
-- `/runs`, `/runs/:id`, `/runs/new` — run list, progress, and the start form (API key
-  kept in localStorage, sent as Bearer).
+- `/runs`, `/runs/:id`, `/runs/new` — run list, progress, who pays, and the start form: a
+  searchable model picker per seat over `GET /api/catalog` (featured first, grouped by
+  provider, with price per MTok and estimated cost per seat), a live run estimate next to
+  the budget, and the payer: the creator's OpenRouter key (kept in memory, sent once as
+  `x-openrouter-key`; the returned cancel token is kept in localStorage) or the bench API
+  key (localStorage, sent as Bearer).
 - `/about` — methodology: rules, variants, protocol, metrics.
 
 ---
