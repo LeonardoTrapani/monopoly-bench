@@ -270,8 +270,9 @@ refusal carries the engine's `IllegalCommand` reason.
 
 Every wake message is appended to the seat's whole-game conversation (SPEC §6.2), so a model
 remembers the whole game; when the conversation would pass 80 000 tokens (or 60% of a smaller
-context window), the same model summarizes everything but its last 6 wakes with a fixed
-instruction (`COMPACTION_PROMPT` in `@mb/agent`). The transcript of that wake starts with a
+context window), the same model summarizes everything but its last wakes with a fixed
+instruction (`COMPACTION_PROMPT` in `@mb/agent`). It keeps 6 wakes verbatim, fewer when they
+would fill more than half of 60% of the window; runs refuse models under a 32 000-token window. The transcript of that wake starts with a
 `[memory]` line and the summary; its usage and cost are in the wake's.
 
 ## Before release

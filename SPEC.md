@@ -413,15 +413,19 @@ conversation is append-only, so every request extends the previous one and provi
 caching keeps working (one provider session id per seat, `<gameId>:<seat>`). It is persisted
 in PlayerDO SQLite (one row per message) and kept in memory by the CLI simulation.
 
-**Compaction**, the only rewrite. Before a wake whose request would exceed a fixed budget,
-the same for every model (`compactAtTokens` = 80 000 tokens, lowered to 60% of the model's
-context window when that is smaller; estimated from the last response's reported prompt and
-output tokens plus about one token per 4 characters for what follows), the same model, with
+**Compaction**, the only rewrite. It runs before a wake whose request would exceed a fixed
+budget, the same for every model (`compactAtTokens` = 80 000 tokens, lowered to 60% of the
+model's context window when that is smaller), once more than 6 wakes exist, or before any wake
+that would exceed 60% of the context window (estimated from the last response's reported
+prompt and output tokens plus about one token per 4 characters for what follows). The same
+model, with
 the same reasoning level and session, writes a summary of the older part with a fixed
 instruction (`COMPACTION_PROMPT`: standings, its own plans, promises made and received, reads
 on opponents, trade history, anything still pending; at most about 1 500 output tokens). The
-conversation becomes: system message, that summary (as a user turn), the last 6 wakes
-verbatim. The summary's usage and cost count in the wake that triggered it; its transcript
+conversation becomes: system message, that summary (as a user turn), the last wakes verbatim:
+6, or fewer when those would fill more than half of the 60%-of-window limit (never all of
+them, so something is folded). Runs refuse models whose context window is under 32 000
+tokens. The summary's usage and cost count in the wake that triggered it; its transcript
 `text` starts with a `[memory]` line and the summary, and the D1 `wakes.compactions` column
 records it. A summary request that fails leaves the conversation as it was (it is compacted
 at a later wake); an empty summary drops the older part, so the conversation stays bounded.
@@ -702,7 +706,8 @@ Routes:
 | `maxToolCallsPerWake` / `maxInvalidPerWake` | 24 / 6                      |
 | `wakeTimeoutMs`                             | 180 000                     |
 | memory: `compactAtTokens` (§6.2)            | 80 000 (≤ 60% of context)   |
-| memory: wakes kept / summary output tokens  | 6 / 1 500                   |
+| memory: wakes kept / summary output tokens  | up to 6 / 1 500             |
+| minimum context window for a seat           | 32 000                      |
 | catalog cache (§6.7)                        | 1 h (bundled list: 5 min)   |
 | run `concurrency`                           | 2                           |
 
