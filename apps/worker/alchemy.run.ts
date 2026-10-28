@@ -45,9 +45,16 @@ export const Database = Cloudflare.D1.Database("Database", { migrations: "./migr
 
 export const Archive = Cloudflare.R2.Bucket("Archive");
 
+/** `alchemy dev` listens on HOST/PORT when set (e.g. by a preview tunnel), else localhost:1337. */
+const devServer = {
+  host: process.env.HOST ?? "localhost",
+  port: Number.parseInt(process.env.PORT ?? "1337", 10),
+};
+
 export const Api = Cloudflare.Worker("Api", {
   main: "./src/worker.ts",
   compatibility: { date: "2026-10-01" },
+  dev: devServer,
   assets: {
     directory: webBuilt ? webDist : placeholderAssets,
     notFoundHandling: "single-page-application",

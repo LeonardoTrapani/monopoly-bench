@@ -31,6 +31,7 @@ export interface PendingDecision {
 
 export interface Pending {
   readonly turn: number;
+  /** Game round: full rounds of turns started so far (SPEC §3.3 turn cap). */
   readonly round: number;
   readonly decisions: ReadonlyArray<PendingDecision>;
 }

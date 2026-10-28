@@ -234,10 +234,14 @@ export const engineBinding: EngineBinding<GameState, GameEvent, Command> = {
       Pending.match(pending(state), {
         Waiting: (waiting) => ({
           turn: state.control.turn,
-          round: waiting.requests[0]?.round ?? 0,
+          round: state.control.gameRound,
           decisions: waiting.requests.map(toDecision),
         }),
-        Finished: () => ({ turn: state.control.turn, round: 0, decisions: [] }),
+        Finished: () => ({
+          turn: state.control.turn,
+          round: state.control.gameRound,
+          decisions: [],
+        }),
       }),
     isAwaiting: (state, seat, decisionId) => decisionIdOf(state, seat) === decisionId,
     spectatorView: (state) => encodeSpectatorView(spectatorView(state)),
