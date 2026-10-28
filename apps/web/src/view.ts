@@ -1,8 +1,7 @@
-import clsx from "clsx";
 import type { Document, Html, HtmlBuilder } from "foldkit/html";
 
 import { Message } from "./message.ts";
-import { Page, type Model } from "./model.ts";
+import { Page, runCredentials, type Model } from "./model.ts";
 import { aboutView } from "./page/about.ts";
 import * as Competitor from "./page/competitor.ts";
 import * as Game from "./page/game/index.ts";
@@ -12,6 +11,7 @@ import * as NewRun from "./page/newRun.ts";
 import * as Run from "./page/run.ts";
 import * as Runs from "./page/runs.ts";
 import { homeRouter } from "./route.ts";
+
 import { footer, header } from "./view/layout.ts";
 import { BUTTON_PRIMARY } from "./view/ui.ts";
 
@@ -104,7 +104,7 @@ const pageView = (model: Model, h: HtmlBuilder<Message>): Html =>
         slotId: "run",
         model: run,
         view: Run.view,
-        viewInputs: { hasApiKey: model.apiKey !== "" },
+        viewInputs: { credentials: runCredentials(model) },
         toParentMessage: (message) => Message.GotRunMessage({ message }),
       }),
     NewRun: ({ newRun }) =>
@@ -121,13 +121,7 @@ const pageView = (model: Model, h: HtmlBuilder<Message>): Html =>
 export const view = (model: Model, h: HtmlBuilder<Message>): Document => ({
   title: pageTitle(model.page),
   body: h.div(
-    [
-      h.Class(
-        clsx("flex min-h-screen flex-col bg-page text-ink", {
-          "theme-dark": model.theme === "Dark",
-        }),
-      ),
-    ],
+    [h.Class("flex min-h-screen flex-col bg-page text-ink")],
     [header(model, h), h.main([h.Class("flex-1")], [pageView(model, h)]), footer(h)],
   ),
 });

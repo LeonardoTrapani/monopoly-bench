@@ -36,7 +36,7 @@ describe("leaderboard domain", () => {
     ).toEqual([
       [1, "b/beta"],
       [2, "a/alpha"],
-      [3, "bot:random"],
+      [3, "c/gamma"],
     ]);
   });
 
@@ -46,7 +46,7 @@ describe("leaderboard domain", () => {
     expect(byGames).toEqual({ column: "Games", direction: "Descending" });
     expect(
       sortEntries(leaderboard(4).entries, byGames).map((row) => row.entry.competitorId),
-    ).toEqual(["bot:random", "b/beta", "a/alpha"]);
+    ).toEqual(["c/gamma", "b/beta", "a/alpha"]);
 
     expect(nextSort(byGames, "Games")).toEqual({ column: "Games", direction: "Ascending" });
     expect(nextSort(byGames, "AvgPlace")).toEqual({ column: "AvgPlace", direction: "Ascending" });
@@ -57,7 +57,7 @@ describe("leaderboard domain", () => {
 
     expect(headToHead(cells, "a/alpha", "b/beta")).toEqual({ games: 10, ahead: 3 });
     expect(headToHead(cells, "b/beta", "a/alpha")).toEqual({ games: 10, ahead: 7 });
-    expect(headToHead(cells, "a/alpha", "bot:random")).toBeNull();
+    expect(headToHead(cells, "a/alpha", "c/gamma")).toBeNull();
   });
 });
 
@@ -122,7 +122,7 @@ describe("home view", () => {
       Scene.expect(Scene.role("heading", { name: "Leaderboard" })).toExist(),
       Scene.expect(Scene.nth(Scene.all.role("row"), 1)).toContainText("B/BETA"),
       Scene.click(Scene.role("button", { name: "Games" })),
-      Scene.expect(Scene.nth(Scene.all.role("row"), 1)).toContainText("BOT:RANDOM"),
+      Scene.expect(Scene.nth(Scene.all.role("row"), 1)).toContainText("C/GAMMA"),
       Scene.click(Scene.role("button", { name: "Games" })),
       Scene.expect(Scene.nth(Scene.all.role("row"), 1)).toContainText("A/ALPHA"),
     );

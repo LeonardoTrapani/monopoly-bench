@@ -1,5 +1,5 @@
 /** URL routes of the web app (SPEC §9). Routers print URLs; never build paths by hand. */
-import { Schema, pipe } from "effect";
+import { Option, Schema, pipe } from "effect";
 import { Route } from "foldkit";
 import { defineRouteUnion, literal, restString, slash, string } from "foldkit/route";
 
@@ -27,11 +27,25 @@ export const gameRouter = pipe(
   Route.mapTo(AppRoute.Game),
 );
 
-/** Competitor ids contain `/` and `:` (`anthropic/claude-x:high`), so they take the rest of the path. */
+const tryDecodeUriComponent = Option.liftThrowable(decodeURIComponent);
+
+/** Percent-decodes a URL piece (`bot%3Arandom` → `bot:random`); malformed escapes stay as typed. */
+export const decodeUriPart = (text: string): string =>
+  Option.getOrElse(tryDecodeUriComponent(text), () => text);
+
+/**
+ * Competitor ids contain `/` and `:` (`anthropic/claude-x:high`), so they take the rest of the
+ * path. Links print the raw id; a pasted or shared URL may arrive percent-encoded
+ * (`/models/bot%3Arandom`, `/models/anthropic%2Fclaude-x`), so parsing decodes it and the route
+ * always holds the raw id (the API client encodes it once).
+ */
 export const competitorRouter = pipe(
   literal("models"),
   slash(restString("competitorId")),
-  Route.mapTo(AppRoute.Competitor),
+  Route.mapTo({
+    make: ({ competitorId }: Readonly<{ competitorId: string }>) =>
+      AppRoute.Competitor({ competitorId: decodeUriPart(competitorId) }),
+  }),
 );
 
 export const runsRouter = pipe(literal("runs"), Route.mapTo(AppRoute.Runs));

@@ -11,6 +11,8 @@ import {
   type GamesResponse,
   type Leaderboard,
   type ModelProfile,
+  type CatalogResponse,
+  type CreateRunResponse,
   type ModelsResponse,
   type RunConfig,
   type RunDetail,
@@ -20,6 +22,7 @@ import {
 } from "@mb/api";
 import { GameEvent, type GameConfig } from "@mb/engine";
 import { Context, Effect, Option, Schema, type Stream } from "effect";
+import { defineTaggedUnion } from "foldkit/schema";
 
 /** A failed API call: HTTP status (0 for network or decoding failures) and a readable message. */
 export class ApiError extends Schema.TaggedError<ApiError>()("ApiError", {
@@ -66,6 +69,29 @@ export const FeedMessage = Schema.TaggedUnion({
 
 export type FeedMessage = typeof FeedMessage.Type;
 
+/**
+ * Who pays for a new run (`POST /api/runs`): the creator's own OpenRouter key, sent once in the
+ * `x-openrouter-key` header and never stored by this app, or the server, authorized by the bench
+ * API key (`Authorization: Bearer`).
+ */
+export const RunPayment = defineTaggedUnion({
+  OwnKey: { openRouterKey: Schema.String },
+  BenchKey: { apiKey: Schema.String },
+});
+
+export type RunPayment = typeof RunPayment.Type;
+
+/**
+ * What authorizes `POST /api/runs/:id/cancel`: the run's cancel token (`x-run-token`, returned
+ * when an own-key run is created) or the bench API key.
+ */
+export const CancelAuth = defineTaggedUnion({
+  RunToken: { token: Schema.String },
+  BenchKey: { apiKey: Schema.String },
+});
+
+export type CancelAuth = typeof CancelAuth.Type;
+
 export interface ApiClient {
   readonly leaderboard: (players: PlayersCount) => Effect.Effect<Leaderboard, ApiError>;
   readonly models: Effect.Effect<ModelsResponse, ApiError>;
@@ -82,8 +108,13 @@ export interface ApiClient {
   ) => Effect.Effect<ReadonlyArray<GameEvent>, ApiError>;
   /** Wake transcripts of every seat (NDJSON). */
   readonly transcripts: (gameId: string) => Effect.Effect<ReadonlyArray<WakeTranscript>, ApiError>;
-  readonly createRun: (config: RunConfig, apiKey: string) => Effect.Effect<RunSummary, ApiError>;
-  readonly cancelRun: (runId: string, apiKey: string) => Effect.Effect<RunSummary, ApiError>;
+  /** OpenRouter models that support tools, with prices and per-seat cost estimates. */
+  readonly catalog: Effect.Effect<CatalogResponse, ApiError>;
+  readonly createRun: (
+    config: RunConfig,
+    payment: RunPayment,
+  ) => Effect.Effect<CreateRunResponse, ApiError>;
+  readonly cancelRun: (runId: string, auth: CancelAuth) => Effect.Effect<RunSummary, ApiError>;
   /** The spectator feed of a game; ends when the socket closes. */
   readonly spectate: (gameId: string) => Stream.Stream<FeedMessage, ApiError>;
 }

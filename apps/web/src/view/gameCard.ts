@@ -5,6 +5,7 @@ import type { Html, HtmlBuilder } from "foldkit/html";
 
 import { END_REASON_TEXT, ordinal, timestamp, usd } from "../domain/format.ts";
 import { gameHref } from "../route.ts";
+import { competitorIcon } from "./provider.ts";
 import { gameStatusBadge, seatToken } from "./ui.ts";
 
 const seatsCell = <M>(h: HtmlBuilder<M>, game: GameSummary): Html =>
@@ -18,6 +19,7 @@ const seatsCell = <M>(h: HtmlBuilder<M>, game: GameSummary): Html =>
           [h.Class("flex items-center gap-2 text-sm")],
           [
             seatToken(h, seat.seat, "sm"),
+            competitorIcon(h, seat.competitorId, "xs"),
             h.span(
               [
                 h.Class(
@@ -78,7 +80,7 @@ export const gameCardView = <M>(h: HtmlBuilder<M>, game: GameSummary): Html => {
             [
               h.p([], [game.startedAt === null ? "not started" : timestamp(game.startedAt)]),
               game.endReason === null ? h.empty : h.p([], [END_REASON_TEXT[game.endReason]]),
-              h.p([h.Class("num")], [cost === 0 ? "bots only" : `${usd(cost)} spent`]),
+              h.p([h.Class("num")], [`${usd(cost)} spent`]),
               h.p(
                 [h.Class("font-semibold text-red")],
                 [game.status === "running" ? "Watch live →" : "Replay →"],

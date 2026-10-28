@@ -1,32 +1,29 @@
 /**
  * Mock competitors: a latent skill per model drives plausible ratings, head-to-head results,
- * behavior stats and costs. Deterministic: the same numbers on every load.
+ * behavior stats and costs. Deterministic: the same numbers on every load. LLMs only, like the
+ * public leaderboard.
  */
-import {
-  defaultModelCatalog,
-  type BehaviorStats,
-  type HeadToHeadCell,
-  type Leaderboard,
-  type LeaderboardEntry,
-  type ModelProfile,
-  type PlayersCount,
+import type {
+  BehaviorStats,
+  HeadToHeadCell,
+  Leaderboard,
+  LeaderboardEntry,
+  ModelProfile,
+  PlayersCount,
 } from "@mb/api";
 
+import { catalogLabel } from "./catalog.ts";
 import { between, intBetween, noise, unit } from "./random.ts";
 
 export interface MockCompetitor {
   readonly competitorId: string;
   readonly label: string;
-  readonly kind: "llm" | "bot";
-  /** Latent strength, roughly 0 (random bot) to 1 (best model). */
+  /** Latent strength, roughly 0 (plays at random) to 1 (best model). */
   readonly skill: number;
   readonly costPerGameUsd: number;
   readonly avgWakeMs: number;
   readonly invalidRate: number;
 }
-
-const catalogLabel = (model: string): string =>
-  defaultModelCatalog.find((entry) => entry.model === model)?.label ?? model;
 
 const llm = (
   model: string,
@@ -38,7 +35,6 @@ const llm = (
 ): MockCompetitor => ({
   competitorId: reasoning === null ? model : `${model}:${reasoning}`,
   label: reasoning === null ? catalogLabel(model) : `${catalogLabel(model)} (${reasoning})`,
-  kind: "llm",
   skill,
   costPerGameUsd,
   avgWakeMs,
@@ -57,25 +53,11 @@ export const COMPETITORS: ReadonlyArray<MockCompetitor> = [
   llm("qwen/qwen3.8-max-0902", null, 0.66, 0.58, 10400, 0.024),
   llm("z-ai/glm-5.3", null, 0.6, 0.39, 9100, 0.031),
   llm("anthropic/claude-haiku-5.5", null, 0.57, 0.32, 3900, 0.018),
+  llm("google/gemini-4-flash", null, 0.55, 0.21, 3100, 0.027),
   llm("mistralai/mistral-large-4-0", null, 0.51, 0.62, 6800, 0.038),
-  {
-    competitorId: "bot:heuristic",
-    label: "Bot (heuristic)",
-    kind: "bot",
-    skill: 0.45,
-    costPerGameUsd: 0,
-    avgWakeMs: 0,
-    invalidRate: 0,
-  },
-  {
-    competitorId: "bot:random",
-    label: "Bot (random)",
-    kind: "bot",
-    skill: 0.05,
-    costPerGameUsd: 0,
-    avgWakeMs: 0,
-    invalidRate: 0,
-  },
+  llm("minimax/minimax-m3", null, 0.48, 0.18, 7900, 0.035),
+  llm("meta-llama/llama-5-maverick", null, 0.4, 0.2, 5200, 0.052),
+  llm("sao10k/l4-euryale-90b", null, 0.28, 0.31, 6100, 0.071),
 ];
 
 export const competitorById = (competitorId: string): MockCompetitor | undefined =>
@@ -86,13 +68,11 @@ const playsAt = (competitor: MockCompetitor, players: PlayersCount): boolean =>
   players === 4 || players === 2 || unit(`${competitor.competitorId}:plays:${players}`) < 0.82;
 
 const gamesAt = (competitor: MockCompetitor, players: PlayersCount): number =>
-  competitor.kind === "bot"
-    ? intBetween(`${competitor.competitorId}:games:${players}`, 60, 140)
-    : intBetween(
-        `${competitor.competitorId}:games:${players}`,
-        players === 4 ? 30 : 10,
-        players === 4 ? 96 : 48,
-      );
+  intBetween(
+    `${competitor.competitorId}:games:${players}`,
+    players === 4 ? 30 : 10,
+    players === 4 ? 96 : 48,
+  );
 
 const entryFor = (competitor: MockCompetitor, players: PlayersCount): LeaderboardEntry => {
   const key = `${competitor.competitorId}:${players}`;
@@ -117,7 +97,7 @@ const entryFor = (competitor: MockCompetitor, players: PlayersCount): Leaderboar
   return {
     competitorId: competitor.competitorId,
     label: competitor.label,
-    kind: competitor.kind,
+    kind: "llm",
     mu,
     sigma,
     score: mu - 3 * sigma,
@@ -128,7 +108,7 @@ const entryFor = (competitor: MockCompetitor, players: PlayersCount): Leaderboar
       (900 + competitor.skill * 4200 + noise(`${key}:worth`, 500)) * (4 / players),
     ),
     invalidRate: competitor.invalidRate * between(`${key}:invalid`, 0.7, 1.3),
-    timeoutRate: competitor.kind === "bot" ? 0 : between(`${key}:timeout`, 0, 0.012),
+    timeoutRate: between(`${key}:timeout`, 0, 0.012),
     costPerGameUsd: competitor.costPerGameUsd * (players / 4) * between(`${key}:cost`, 0.85, 1.15),
     avgWakeMs: competitor.avgWakeMs * between(`${key}:latency`, 0.9, 1.1),
   };
@@ -177,10 +157,7 @@ const behaviorFor = (competitor: MockCompetitor): BehaviorStats => {
   const key = competitor.competitorId;
   const games = gamesAt(competitor, 4) + gamesAt(competitor, 2);
 
-  const offersMade =
-    competitor.kind === "bot"
-      ? intBetween(`${key}:offers`, 20, 90)
-      : Math.round(games * between(`${key}:offers`, 1.5, 6));
+  const offersMade = Math.round(games * between(`${key}:offers`, 1.5, 6));
 
   return {
     offersMade,
@@ -243,7 +220,7 @@ export const mockProfile = (
   return {
     competitorId: competitor.competitorId,
     label: competitor.label,
-    kind: competitor.kind,
+    kind: "llm",
     ratings,
     ratingHistory,
     behavior: behaviorFor(competitor),

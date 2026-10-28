@@ -1,20 +1,31 @@
 /**
  * The in-browser mock API (`VITE_API_MODE=mock`): generated leaderboards, model profiles and
- * runs, games backed by the sim fixtures, and a fake live game replayed on a timer. It simulates
- * a server, so unlike the app it keeps mutable state (runs created from the form).
+ * runs, the model catalog, games backed by the sim fixtures, and a fake live game replayed on a
+ * timer. It simulates a server, so unlike the app it keeps mutable state (runs created from the
+ * form and their cancel tokens).
+ *
+ * Keys it accepts: any OpenRouter key starting with `sk-or-` (own-key runs), and any bench API
+ * key except `invalid`.
  */
 import {
-  BotSeat,
   LlmSeat,
-  defaultModelCatalog,
   type GameSummary,
   type RunConfig,
+  type RunFunding,
   type RunSummary,
   type SeatSpec,
 } from "@mb/api";
 import { Effect, Layer, Option, Stream } from "effect";
 
-import { Api, ApiError, type ApiClient, type GamesQuery } from "../api/api.ts";
+import {
+  Api,
+  ApiError,
+  CancelAuth,
+  RunPayment,
+  type ApiClient,
+  type GamesQuery,
+} from "../api/api.ts";
+import { MOCK_CATALOG } from "./catalog.ts";
 import { COMPETITORS, competitorById, mockLeaderboard, mockProfile } from "./competitors.ts";
 import {
   GAME_DEFS,
@@ -77,11 +88,6 @@ const summaryOf = (def: MockGameDef): GameSummary => {
 
 const seatSpec = (competitorId: string): SeatSpec => {
   const competitor = competitorById(competitorId);
-
-  if (competitorId.startsWith("bot:")) {
-    return BotSeat.make({ policy: competitorId === "bot:random" ? "random" : "heuristic" });
-  }
-
   const [model = competitorId, reasoning] = competitorId.split(":");
 
   return reasoning === "high"
@@ -95,6 +101,7 @@ const lineupOf = (runId: string): ReadonlyArray<SeatSpec> =>
 const BASE_RUNS: ReadonlyArray<RunSummary> = [
   {
     id: "run-frontier-4p",
+    funding: "server",
     name: "Frontier league · 4 players",
     createdAt: "2026-10-28T05:50:00.000Z",
     status: "running",
@@ -108,7 +115,8 @@ const BASE_RUNS: ReadonlyArray<RunSummary> = [
   },
   {
     id: "run-open-4p",
-    name: "Open models vs baselines",
+    funding: "ownKey",
+    name: "Open-weight challengers",
     createdAt: "2026-10-27T15:30:00.000Z",
     status: "finished",
     playersCount: 4,
@@ -121,6 +129,7 @@ const BASE_RUNS: ReadonlyArray<RunSummary> = [
   },
   {
     id: "run-heads-up",
+    funding: "server",
     name: "Heads-up duels",
     createdAt: "2026-10-26T09:30:00.000Z",
     status: "finished",
@@ -134,6 +143,7 @@ const BASE_RUNS: ReadonlyArray<RunSummary> = [
   },
   {
     id: "run-big-3p",
+    funding: "ownKey",
     name: "Three-way tables",
     createdAt: "2026-10-25T13:50:00.000Z",
     status: "finished",
@@ -147,6 +157,7 @@ const BASE_RUNS: ReadonlyArray<RunSummary> = [
   },
   {
     id: "run-big-5p",
+    funding: "server",
     name: "Five at the table",
     createdAt: "2026-10-25T15:20:00.000Z",
     status: "finished",
@@ -160,6 +171,7 @@ const BASE_RUNS: ReadonlyArray<RunSummary> = [
   },
   {
     id: "run-big-6p",
+    funding: "ownKey",
     name: "Full table · 6 players",
     createdAt: "2026-10-25T17:00:00.000Z",
     status: "cancelled",
@@ -174,6 +186,28 @@ const BASE_RUNS: ReadonlyArray<RunSummary> = [
 ];
 
 const createdRuns: Array<RunSummary> = [];
+
+/** Cancel tokens of the own-key runs created in this session, by run id. */
+const cancelTokens = new Map<string, string>();
+
+const fundingOf = (payment: RunPayment): RunFunding =>
+  RunPayment.match(payment, {
+    OwnKey: (): RunFunding => "ownKey",
+    BenchKey: (): RunFunding => "server",
+  });
+
+/** Why the server would refuse to start a run with this payment, if it would. */
+const paymentProblem = (payment: RunPayment): Option.Option<ApiError> =>
+  RunPayment.match(payment, {
+    OwnKey: ({ openRouterKey }) =>
+      openRouterKey.startsWith("sk-or-")
+        ? Option.none()
+        : Option.some(new ApiError({ status: 401, message: "OpenRouter rejected this API key" })),
+    BenchKey: ({ apiKey }) =>
+      apiKey.trim() === "" || apiKey === "invalid"
+        ? Option.some(new ApiError({ status: 401, message: "Missing or invalid API key" }))
+        : Option.none(),
+  });
 
 const withLiveStatus = (run: RunSummary): RunSummary => {
   if (run.status !== "queued") return run;
@@ -224,12 +258,11 @@ const mockClient = (): ApiClient => ({
       competitors: COMPETITORS.map((competitor) => ({
         competitorId: competitor.competitorId,
         label: competitor.label,
-        kind: competitor.kind,
+        kind: "llm" as const,
         games:
           mockLeaderboard(4).entries.find((entry) => entry.competitorId === competitor.competitorId)
             ?.games ?? 0,
       })),
-      catalog: defaultModelCatalog,
     })),
   ),
   model: (competitorId) =>
@@ -308,15 +341,34 @@ const mockClient = (): ApiClient => ({
         return Effect.succeed(mockWakes(game.config, game.events).map((wake) => wake.transcript));
       }),
     ),
-  createRun: (config: RunConfig, apiKey) =>
+  catalog: latency(Effect.succeed(MOCK_CATALOG)),
+  createRun: (config: RunConfig, payment) =>
     latency(
       Effect.suspend(() => {
-        if (apiKey.trim() === "" || apiKey === "invalid") {
-          return Effect.fail(new ApiError({ status: 401, message: "Missing or invalid API key" }));
+        const funding = paymentProblem(payment);
+
+        if (Option.isSome(funding)) return Effect.fail(funding.value);
+
+        const unknown = config.players.find(
+          (seat) => !MOCK_CATALOG.models.some((entry) => entry.model === seat.model),
+        );
+
+        if (unknown !== undefined) {
+          return Effect.fail(
+            new ApiError({ status: 400, message: `Unknown model ${unknown.model}` }),
+          );
         }
 
+        const id = `run-${Date.now().toString(36)}`;
+
+        const cancelToken = RunPayment.match(payment, {
+          OwnKey: () => Option.some(`tok-${id}-${Math.random().toString(36).slice(2, 10)}`),
+          BenchKey: () => Option.none(),
+        });
+
         const run: RunSummary = {
-          id: `run-${Date.now().toString(36)}`,
+          id,
+          funding: fundingOf(payment),
           name: config.name ?? null,
           createdAt: new Date().toISOString(),
           status: "queued",
@@ -337,14 +389,23 @@ const mockClient = (): ApiClient => ({
 
         createdRuns.push(run);
 
-        return Effect.succeed(run);
+        if (Option.isSome(cancelToken)) cancelTokens.set(id, cancelToken.value);
+
+        return Effect.succeed({ run, cancelToken: Option.getOrNull(cancelToken) });
       }),
     ),
-  cancelRun: (runId, apiKey) =>
+  cancelRun: (runId, auth) =>
     latency(
       Effect.suspend(() => {
-        if (apiKey.trim() === "")
-          return Effect.fail(new ApiError({ status: 401, message: "Missing or invalid API key" }));
+        const isAllowed = CancelAuth.match(auth, {
+          RunToken: ({ token }) => cancelTokens.get(runId) === token,
+          BenchKey: ({ apiKey }) => apiKey.trim() !== "" && apiKey !== "invalid",
+        });
+
+        if (!isAllowed)
+          return Effect.fail(
+            new ApiError({ status: 401, message: "Missing or invalid API key or run token" }),
+          );
 
         const index = createdRuns.findIndex((run) => run.id === runId);
         const run = createdRuns[index];

@@ -218,6 +218,8 @@ export interface ScatterPoint<M> {
   readonly key: string;
   readonly label: string;
   readonly color: string;
+  /** A logo drawn inside the mark (e.g. the provider's), or a plain colored dot when null. */
+  readonly icon: string | null;
   readonly x: number;
   readonly y: number;
   readonly tooltip: string;
@@ -361,9 +363,10 @@ export const scatterChart = <M>(h: HtmlBuilder<M>, config: ScatterConfig<M>): Ht
   const dots = config.points.map((point) => {
     const cx = scaleX(point.x);
     const cy = scaleY(point.y);
+    const labelGap = point.icon === null ? 9 : 13;
     const labelOnLeft = cx > config.width - 150;
     const labelWidth = point.label.length * 6;
-    const labelStart = labelOnLeft ? cx - 9 - labelWidth : cx + 9;
+    const labelStart = labelOnLeft ? cx - labelGap - labelWidth : cx + labelGap;
 
     const collides = placedLabels.some(
       ([x, y, width]) =>
@@ -380,20 +383,42 @@ export const scatterChart = <M>(h: HtmlBuilder<M>, config: ScatterConfig<M>): Ht
       [
         h.title([], [point.tooltip]),
         h.circle([h.Cx(numberAttr(cx)), h.Cy(numberAttr(cy)), h.R("14"), h.Fill("transparent")]),
-        h.circle([
-          h.Cx(numberAttr(cx)),
-          h.Cy(numberAttr(cy)),
-          h.R("5.5"),
-          h.Fill(point.color),
-          h.Stroke("var(--paper)"),
-          h.StrokeWidth("2"),
-          h.Attribute("opacity", point.isMuted ? "0.55" : "1"),
-        ]),
+        ...(point.icon === null
+          ? [
+              h.circle([
+                h.Cx(numberAttr(cx)),
+                h.Cy(numberAttr(cy)),
+                h.R("5.5"),
+                h.Fill(point.color),
+                h.Stroke("var(--paper)"),
+                h.StrokeWidth("2"),
+                h.Attribute("opacity", point.isMuted ? "0.55" : "1"),
+              ]),
+            ]
+          : [
+              h.circle([
+                h.Cx(numberAttr(cx)),
+                h.Cy(numberAttr(cy)),
+                h.R("9"),
+                h.Fill("#ffffff"),
+                h.Stroke(point.color),
+                h.StrokeWidth("1.75"),
+                h.Attribute("opacity", point.isMuted ? "0.55" : "1"),
+              ]),
+              h.image([
+                h.Attribute("href", point.icon),
+                h.X(numberAttr(cx - 5.5)),
+                h.Y(numberAttr(cy - 5.5)),
+                h.Width("11"),
+                h.Height("11"),
+                h.AriaHidden(true),
+              ]),
+            ]),
         collides
           ? h.empty
           : h.text(
               [
-                h.X(numberAttr(labelOnLeft ? cx - 9 : cx + 9)),
+                h.X(numberAttr(labelOnLeft ? cx - labelGap : cx + labelGap)),
                 h.Y(numberAttr(cy + 3.5)),
                 h.Attribute("text-anchor", labelOnLeft ? "end" : "start"),
                 h.Class(

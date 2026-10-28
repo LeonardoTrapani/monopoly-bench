@@ -973,7 +973,7 @@ export interface BoardInput {
 
 export const boardView = <M>(h: HtmlBuilder<M>, input: BoardInput): Html =>
   h.div(
-    [h.Class("board-light relative aspect-square w-full select-none")],
+    [h.Class("relative aspect-square w-full select-none")],
     [
       h.svg(
         [

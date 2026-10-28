@@ -8,7 +8,7 @@ import clsx from "clsx";
 import { AsyncData } from "foldkit";
 import type { Html, HtmlBuilder } from "foldkit/html";
 
-import { SEAT_COLORS, SEAT_INK, providerColor } from "../domain/palette.ts";
+import { SEAT_COLORS, SEAT_INK } from "../domain/palette.ts";
 
 export const BUTTON_PRIMARY =
   "inline-flex items-center justify-center gap-2 rounded-md border-[1.5px] border-line-strong bg-red px-4 py-2 text-sm font-semibold text-white shadow-[3px_3px_0_var(--shadow)] transition hover:bg-red-deep focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red active:translate-x-px active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50";
@@ -115,14 +115,6 @@ export const seatToken = <M>(
     [seat],
   );
 
-/** Colored dot of a competitor's provider. */
-export const providerDot = <M>(h: HtmlBuilder<M>, competitorId: string): Html =>
-  h.span([
-    h.Class("inline-block h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/10"),
-    h.Style({ background: providerColor(competitorId) }),
-    h.AriaHidden(true),
-  ]);
-
 export const pill = <M>(h: HtmlBuilder<M>, text: string, className: string): Html =>
   h.span(
     [
@@ -135,9 +127,6 @@ export const pill = <M>(h: HtmlBuilder<M>, text: string, className: string): Htm
     ],
     [text],
   );
-
-export const botBadge = <M>(h: HtmlBuilder<M>): Html =>
-  pill(h, "Bot", "border border-line bg-paper-2 text-muted");
 
 export const liveBadge = <M>(h: HtmlBuilder<M>, text = "Live"): Html =>
   h.span(

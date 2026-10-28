@@ -10,7 +10,7 @@ import { withApi, type Api } from "../api/api.ts";
 import { timestamp } from "../domain/format.ts";
 import { failWith, reload, succeedWith } from "../domain/remote.ts";
 import { newRunRouter, runHref } from "../route.ts";
-import { budgetView, lineupView, progressView } from "../view/run.ts";
+import { budgetView, fundingBadge, lineupView, progressView } from "../view/run.ts";
 import { BUTTON_PRIMARY, emptyView, remote, runStatusBadge, sectionHeading } from "../view/ui.ts";
 
 // MODEL
@@ -78,9 +78,10 @@ const runRow = (h: HtmlBuilder<Message>, run: RunSummary): Html =>
             [h.Class("min-w-0 space-y-1")],
             [
               h.div(
-                [h.Class("flex items-center gap-2")],
+                [h.Class("flex flex-wrap items-center gap-x-2 gap-y-1")],
                 [
                   runStatusBadge(h, run.status),
+                  fundingBadge(h, run.funding),
                   h.span([h.Class("text-xs text-muted")], [timestamp(run.createdAt)]),
                 ],
               ),

@@ -3,11 +3,9 @@
 @import "@fontsource-variable/inter/wght.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
 
-@custom-variant dark (&:where(.theme-dark, .theme-dark *));
-
 /*
- * Design tokens. Light is the primary theme; `.theme-dark` on the app root swaps the surface
- * and ink variables. The eight property colors, Monopoly red and money green are shared.
+ * Design tokens (one light theme): cream paper, board green, ink, the eight property colors,
+ * Monopoly red and money green.
  */
 :root {
   --page: #f3f7f1;
@@ -28,39 +26,6 @@
   --money-light: #e7f1dc;
   --note: #f1f6e4;
   --gold: #e9b72f;
-}
-
-.theme-dark {
-  --page: #0f1511;
-  --paper: #18201a;
-  --paper-2: #1e2820;
-  --board: #23372a;
-  --board-2: #2b4434;
-  --board-line: #b8d6bd;
-  --ink: #edf3ec;
-  --ink-2: #c6d3c7;
-  --muted: #8fa192;
-  --line: #2c3a2f;
-  --line-strong: #c7d7c9;
-  --shadow: rgba(0, 0, 0, 0.45);
-  --money: #5cc171;
-  --money-light: #1d3324;
-  --note: #1c2a1f;
-}
-
-/* The board keeps its classic light colors in every theme. */
-.board-light {
-  --paper: #fffdf8;
-  --paper-2: #f6f3e9;
-  --board: #cfe6cf;
-  --board-2: #bcdcbd;
-  --board-line: #1d2b1f;
-  --ink: #161b17;
-  --ink-2: #3b4a3e;
-  --muted: #667568;
-  --line: #d7dfd3;
-  --line-strong: #1b231c;
-  --shadow: rgba(22, 27, 23, 0.14);
 }
 
 @theme {
@@ -85,7 +50,7 @@
   --color-seat-f: #12a3b5;
 }
 
-/* Inline so utilities read the variables directly and `.theme-dark` can swap them. */
+/* Inline so utilities read the variables directly. */
 @theme inline {
   --color-page: var(--page);
   --color-paper: var(--paper);
