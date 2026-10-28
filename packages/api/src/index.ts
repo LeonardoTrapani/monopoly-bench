@@ -42,9 +42,13 @@ export const TableFrequency = Schema.Literals(["everyRoll", "everyTurn", "everyR
 
 export type TableFrequency = typeof TableFrequency.Type;
 
+/**
+ * A run of games on the deployed bench. Public runs seat LLMs only: bots exist for engine
+ * tests and local simulations (`mb sim`), never on the leaderboard.
+ */
 export const RunConfig = Schema.Struct({
   name: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(120))),
-  players: Schema.Array(SeatSpec).check(Schema.isMinLength(2), Schema.isMaxLength(6)),
+  players: Schema.Array(LlmSeat).check(Schema.isMinLength(2), Schema.isMaxLength(6)),
   /** Number of seeds; games = seeds × players (cyclic seat rotation). */
   seeds: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 })),
   maxRounds: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 1000 }))),
@@ -78,8 +82,18 @@ export const RunStatus = Schema.Literals(["queued", "running", "finished", "canc
 
 export type RunStatus = typeof RunStatus.Type;
 
+/**
+ * Who pays for a run's model calls: the server's OpenRouter key (run created with the
+ * `BENCH_API_KEY` bearer) or the creator's own key (sent once in the `x-openrouter-key`
+ * header of `POST /api/runs`, kept only while the run is active, never returned or archived).
+ */
+export const RunFunding = Schema.Literals(["server", "ownKey"]);
+
+export type RunFunding = typeof RunFunding.Type;
+
 export const RunSummary = Schema.Struct({
   id: Schema.String,
+  funding: RunFunding,
   name: Schema.NullOr(Schema.String),
   createdAt: Schema.String,
   status: RunStatus,
@@ -219,16 +233,50 @@ export const ModelProfile = Schema.Struct({
 
 export type ModelProfile = typeof ModelProfile.Type;
 
+/** OpenRouter prices in USD per million tokens. */
+export const ModelPricing = Schema.Struct({
+  inputPerMTok: Schema.Number,
+  outputPerMTok: Schema.Number,
+  cacheReadPerMTok: Schema.NullOr(Schema.Number),
+  cacheWritePerMTok: Schema.NullOr(Schema.Number),
+});
+
+export type ModelPricing = typeof ModelPricing.Type;
+
+/** One OpenRouter model that supports tool calling, as offered by the run form. */
 export const ModelCatalogEntry = Schema.Struct({
+  /** OpenRouter model id, e.g. "anthropic/claude-sonnet-5.5". */
   model: Schema.String,
   label: Schema.String,
+  /** Provider display name, e.g. "Anthropic". */
   provider: Schema.String,
+  /** Provider key for icons: see `providerSlugOf`. */
+  providerSlug: Schema.String,
+  /** Listed in `featuredModels`: shown first in the picker. */
+  featured: Schema.Boolean,
+  reasoning: Schema.Boolean,
+  contextLength: Schema.NullOr(Schema.Int),
+  pricing: Schema.NullOr(ModelPricing),
+  /** `estimateSeatCostUsd(pricing)`, null without pricing. */
+  estimatedSeatCostUsd: Schema.NullOr(Schema.Number),
 });
 
 export type ModelCatalogEntry = typeof ModelCatalogEntry.Type;
 
+/**
+ * `GET /api/catalog`: OpenRouter models that support tools, refreshed from OpenRouter's
+ * public model list (cached about an hour), or pi-ai's bundled list when OpenRouter is down.
+ */
+export const CatalogResponse = Schema.Struct({
+  updatedAt: Schema.String,
+  source: Schema.Literals(["openrouter", "bundled"]),
+  models: Schema.Array(ModelCatalogEntry),
+});
+
+export type CatalogResponse = typeof CatalogResponse.Type;
+
 export const ModelsResponse = Schema.Struct({
-  /** Competitors that have played at least one game. */
+  /** Competitors that have played at least one rated game. */
   competitors: Schema.Array(
     Schema.Struct({
       competitorId: Schema.String,
@@ -237,8 +285,6 @@ export const ModelsResponse = Schema.Struct({
       games: Schema.Int,
     }),
   ),
-  /** Suggested OpenRouter models for the run form. */
-  catalog: Schema.Array(ModelCatalogEntry),
 });
 
 export type ModelsResponse = typeof ModelsResponse.Type;
@@ -255,7 +301,17 @@ export const GamesResponse = Schema.Struct({ games: Schema.Array(GameSummary) })
 
 export type GamesResponse = typeof GamesResponse.Type;
 
-export const CreateRunResponse = Schema.Struct({ run: RunSummary });
+/**
+ * `POST /api/runs` (body: `RunConfig`) is allowed with `Authorization: Bearer <BENCH_API_KEY>`
+ * (server-funded) or with a valid `x-openrouter-key` header (funded by that key). An own-key
+ * run gets a `cancelToken`, returned only here: `POST /api/runs/:id/cancel` accepts it in the
+ * `x-run-token` header (or the bench bearer). `DELETE /api/runs/:id` (bench bearer only)
+ * removes a run, its games, stats and archives, and recomputes the ratings without them.
+ */
+export const CreateRunResponse = Schema.Struct({
+  run: RunSummary,
+  cancelToken: Schema.NullOr(Schema.String),
+});
 
 export type CreateRunResponse = typeof CreateRunResponse.Type;
 
@@ -332,23 +388,52 @@ export const SeatActivity = Schema.TaggedUnion({
 
 export type SeatActivity = typeof SeatActivity.Type;
 
-/** Suggested models for the run form. Edit freely; ids are OpenRouter ids. */
-export const defaultModelCatalog: ReadonlyArray<ModelCatalogEntry> = [
+/** Models shown first in the run form. Edit freely; ids are OpenRouter ids. */
+export const featuredModels: ReadonlyArray<string> = [
   // Checked against GET https://openrouter.ai/api/v1/models on 2026-10-28 (all support tools).
-  { model: "anthropic/claude-opus-5.5", label: "Claude Opus 5.5", provider: "Anthropic" },
-  { model: "anthropic/claude-sonnet-5.5", label: "Claude Sonnet 5.5", provider: "Anthropic" },
-  { model: "anthropic/claude-haiku-5.5", label: "Claude Haiku 5.5", provider: "Anthropic" },
-  { model: "openai/gpt-6-astra", label: "GPT-6 Astra", provider: "OpenAI" },
-  { model: "openai/gpt-6.1-sol", label: "GPT-6.1 Sol", provider: "OpenAI" },
-  { model: "google/gemini-4-argon", label: "Gemini 4 Argon", provider: "Google" },
-  { model: "x-ai/grok-4.7", label: "Grok 4.7", provider: "xAI" },
-  { model: "deepseek/deepseek-v4-pro-0813", label: "DeepSeek V4 Pro", provider: "DeepSeek" },
-  { model: "qwen/qwen3.8-max-0902", label: "Qwen3.8 Max", provider: "Qwen" },
-  { model: "moonshotai/kimi-k3.1-pro", label: "Kimi K3.1 Pro", provider: "Moonshot AI" },
-  { model: "z-ai/glm-5.3", label: "GLM 5.3", provider: "Z.ai" },
-  { model: "mistralai/mistral-large-4-0", label: "Mistral Large 4", provider: "Mistral" },
-  { model: "minimax/minimax-m3", label: "MiniMax M3", provider: "MiniMax" },
+  "anthropic/claude-opus-5.5",
+  "anthropic/claude-sonnet-5.5",
+  "anthropic/claude-haiku-5.5",
+  "openai/gpt-6-astra",
+  "openai/gpt-6.1-sol",
+  "google/gemini-4-argon",
+  "x-ai/grok-4.7",
+  "deepseek/deepseek-v4-pro-0813",
+  "qwen/qwen3.8-max-0902",
+  "moonshotai/kimi-k3.1-pro",
+  "z-ai/glm-5.3",
+  "mistralai/mistral-large-4-0",
+  "minimax/minimax-m3",
 ];
+
+/** Provider key of an OpenRouter model id: its prefix without OpenRouter's "~" alias mark. */
+export const providerSlugOf = (model: string): string =>
+  (model.split("/")[0] ?? model).replace(/^~/, "");
+
+/**
+ * Cost model behind `estimatedSeatCostUsd` and the run form (measured on bot games and real
+ * Claude Haiku 5.5 wakes, 2026-10-28): one seat of a full 4-player game makes ~225 wakes;
+ * each wake re-reads ~70k cached tokens (the whole-game conversation, compacted at a fixed
+ * budget), writes ~2k new tokens and produces ~1,260 output tokens with medium reasoning.
+ */
+export const seatCostModel = {
+  wakesPerSeat: 225,
+  cachedTokensPerWake: 70_000,
+  freshTokensPerWake: 2_000,
+  outputTokensPerWake: 1_260,
+} as const;
+
+/** Rough USD for one seat over a full 4-player game; models without caching pay full input. */
+export const estimateSeatCostUsd = (pricing: ModelPricing): number => {
+  const cached = pricing.cacheReadPerMTok ?? pricing.inputPerMTok;
+  const fresh = pricing.cacheWritePerMTok ?? pricing.inputPerMTok;
+  const perWake =
+    seatCostModel.cachedTokensPerWake * cached +
+    seatCostModel.freshTokensPerWake * fresh +
+    seatCostModel.outputTokensPerWake * pricing.outputPerMTok;
+
+  return (seatCostModel.wakesPerSeat * perWake) / 1_000_000;
+};
 
 /**
  * Messages on the spectator WebSocket (`GET /api/games/:id/ws`), server → client only.
