@@ -5,7 +5,7 @@ import { Match } from "effect";
 import type { Html, HtmlBuilder } from "foldkit/html";
 
 import { frameLabel, wakeReasonDescription, wakeReasonLabel } from "../../../domain/wake.ts";
-import { seatToken } from "../../../view/ui.ts";
+import { playerTag, seatPlayer } from "../../../view/ui.ts";
 
 const doneSeats = (state: GameState): ReadonlyArray<Seat> => {
   const frame = state.control.stack.at(-1);
@@ -48,7 +48,14 @@ const waitingView = <M>(
         [h.Class("text-sm text-muted")],
         [
           state.control.stack.length === 0
-            ? `End of turn ${state.control.turn}: ${state.control.activeSeat} has moved; the next player is up.`
+            ? h.span(
+                [h.Class("inline-flex flex-wrap items-center gap-1")],
+                [
+                  `End of turn ${state.control.turn}:`,
+                  playerTag(h, seatPlayer(state.players, state.control.activeSeat)),
+                  "has moved; the next player is up.",
+                ],
+              )
             : "The engine is resolving the last actions.",
         ],
       )
@@ -59,11 +66,11 @@ const waitingView = <M>(
             seat,
             [
               h.Class(
-                "flex items-center gap-2 rounded-md border-[1.5px] border-red bg-red/5 px-2 py-1",
+                "flex items-center gap-2 rounded-md border-[1.5px] border-red bg-red/5 px-2 py-1 text-xs",
               ),
             ],
             [
-              seatToken(h, seat, "sm"),
+              playerTag(h, seatPlayer(state.players, seat)),
               h.span([h.Class("text-xs font-semibold text-ink")], ["thinking"]),
               h.span([h.Class("thinking-dots text-red")], [h.span([]), h.span([]), h.span([])]),
             ],
@@ -113,8 +120,16 @@ export const statusView = <M>(
   const body = Pending.match(now, {
     Finished: ({ standings: rows }) =>
       h.p(
-        [h.Class("text-sm text-ink-2")],
-        [`Game over · ${rows.map((row) => `${row.rank}. ${row.seat}`).join("  ")}`],
+        [h.Class("flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-ink-2")],
+        [
+          "Game over ·",
+          ...rows.map((row) =>
+            h.span(
+              [h.Class("inline-flex items-center gap-1")],
+              [`${row.rank}.`, playerTag(h, seatPlayer(state.players, row.seat))],
+            ),
+          ),
+        ],
       ),
     Waiting: ({ requests }) =>
       requests.length === 0
@@ -129,7 +144,7 @@ export const statusView = <M>(
                 request.seat,
                 [
                   h.Class(
-                    clsx("flex items-center gap-2 rounded-md border-[1.5px] px-2 py-1", {
+                    clsx("flex items-center gap-2 rounded-md border-[1.5px] px-2 py-1 text-xs", {
                       "border-line bg-paper-2 opacity-60": isDone,
                       "border-red bg-red/5": !isDone,
                     }),
@@ -137,7 +152,7 @@ export const statusView = <M>(
                   h.Title(request.question),
                 ],
                 [
-                  seatToken(h, request.seat, "sm"),
+                  playerTag(h, seatPlayer(state.players, request.seat)),
                   h.span(
                     [h.Class("text-xs font-semibold text-ink")],
                     [isDone ? "done" : isThinking ? "thinking" : "to act"],

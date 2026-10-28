@@ -17,7 +17,6 @@ import { money, ordinal } from "../../../domain/format.ts";
 import { worthsOf } from "../../../domain/replay.ts";
 import { competitorHref } from "../../../route.ts";
 import { deedChip } from "../../../view/deed.ts";
-import { competitorIcon } from "../../../view/provider.ts";
 import { seatToken } from "../../../view/ui.ts";
 
 export interface SeatActivityHint {
@@ -72,14 +71,13 @@ const playerCard = <M>(
       h.div(
         [h.Class("flex flex-wrap items-start gap-2.5")],
         [
-          seatToken(h, player.seat, "md"),
+          seatToken(h, player, "md"),
           h.div(
             [h.Class("min-w-0 flex-1")],
             [
               h.div(
                 [h.Class("flex items-center gap-1.5")],
                 [
-                  competitorIcon(h, player.competitorId, "xs"),
                   h.a(
                     [
                       h.Href(competitorHref(player.competitorId)),

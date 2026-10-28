@@ -34,9 +34,11 @@ import {
   type SpaceRect,
 } from "../../../domain/board.ts";
 import { money } from "../../../domain/format.ts";
-import { GROUP_COLORS, SEAT_COLORS, SEAT_INK } from "../../../domain/palette.ts";
+import { GROUP_COLORS, providerOf, SEAT_COLORS, SEAT_INK } from "../../../domain/palette.ts";
 import { frameLabel } from "../../../domain/wake.ts";
 import { deedCardView } from "../../../view/deed.ts";
+import { providerIconUrl } from "../../../view/provider.ts";
+import { playerTag, seatPlayer, seatToken, type SeatPlayer } from "../../../view/ui.ts";
 import type { Motion } from "../model.ts";
 
 const INK = "var(--board-line)";
@@ -299,11 +301,13 @@ const buildingsOn = <M>(h: HtmlBuilder<M>, rect: SpaceRect, level: number): Html
   );
 };
 
-const ownerTab = <M>(h: HtmlBuilder<M>, rect: SpaceRect, owner: Seat): Html => {
+/** The owner's tab on a deed: the seat color with the owner's provider logo (or seat letter). */
+const ownerTab = <M>(h: HtmlBuilder<M>, rect: SpaceRect, owner: SeatPlayer): Html => {
   const [cx, cy] = ownerTabCenter(rect);
   const isHorizontal = rect.inner === "Top" || rect.inner === "Bottom";
   const width = isHorizontal ? 44 : MARGIN - 6;
   const height = isHorizontal ? MARGIN - 6 : 44;
+  const logo = owner.competitorId === "" ? null : providerIconUrl(providerOf(owner.competitorId));
 
   return h.g(
     [],
@@ -314,21 +318,36 @@ const ownerTab = <M>(h: HtmlBuilder<M>, rect: SpaceRect, owner: Seat): Html => {
         h.Width(fixed(width)),
         h.Height(fixed(height)),
         h.Attribute("rx", "5"),
-        h.Fill(SEAT_COLORS[owner]),
+        h.Fill(SEAT_COLORS[owner.seat]),
         h.Stroke(INK),
         h.StrokeWidth("1.5"),
       ]),
-      h.text(
-        [
-          h.X(fixed(cx)),
-          h.Y(fixed(cy + 5)),
-          h.Attribute("text-anchor", "middle"),
-          h.Attribute("font-size", "14"),
-          h.Attribute("font-weight", "800"),
-          h.Fill(SEAT_INK[owner]),
-        ],
-        [owner],
-      ),
+      logo === null
+        ? h.text(
+            [
+              h.X(fixed(cx)),
+              h.Y(fixed(cy + 5)),
+              h.Attribute("text-anchor", "middle"),
+              h.Attribute("font-size", "14"),
+              h.Attribute("font-weight", "800"),
+              h.Fill(SEAT_INK[owner.seat]),
+            ],
+            [owner.seat],
+          )
+        : h.g(
+            [],
+            [
+              h.circle([h.Cx(fixed(cx)), h.Cy(fixed(cy)), h.R("8.5"), h.Fill("#ffffff")]),
+              h.image([
+                h.Attribute("href", logo),
+                h.X(fixed(cx - 6)),
+                h.Y(fixed(cy - 6)),
+                h.Width("12"),
+                h.Height("12"),
+              ]),
+            ],
+          ),
+      h.title([], [`Owned by ${owner.label}`]),
     ],
   );
 };
@@ -428,7 +447,7 @@ const streetSpace = <M>(
       ownership !== undefined && isStreet ? buildingsOn(h, rect, ownership.level) : h.empty,
       ownership?.owner === undefined || ownership.owner === null
         ? h.empty
-        : ownerTab(h, rect, ownership.owner),
+        : ownerTab(h, rect, seatPlayer(state.players, ownership.owner)),
     ],
   );
 };
@@ -719,6 +738,7 @@ const patterns = <M>(h: HtmlBuilder<M>): Html =>
 
 export interface TokenInput {
   readonly seat: Seat;
+  readonly competitorId: string;
   readonly position: number;
   readonly laps: number;
   readonly isJailed: boolean;
@@ -744,6 +764,9 @@ const tokenLayer = <M>(
       const slot = sharing.findIndex((other) => other.seat === token.seat);
       const [dx, dy] = tokenOffset(token.position, slot, sharing.length, token.isJailed);
 
+      const logo =
+        token.competitorId === "" ? null : providerIconUrl(providerOf(token.competitorId));
+
       return h.keyed("div")(
         token.seat,
         [
@@ -764,17 +787,25 @@ const tokenLayer = <M>(
             [
               h.Class(
                 clsx(
-                  "flex h-full w-full items-center justify-center rounded-full border-2 border-white text-[clamp(8px,1.3vw,13px)] font-black shadow-[0_2px_3px_rgba(0,0,0,0.45)] transition-transform duration-300",
+                  "flex h-full w-full items-center justify-center rounded-full text-[clamp(8px,1.3vw,13px)] font-black shadow-[0_2px_3px_rgba(0,0,0,0.45)] transition-transform duration-300",
+                  logo === null
+                    ? "border-2 border-white"
+                    : "border-[clamp(2px,0.45vw,4px)] bg-white",
                   { "ring-4 ring-white/80 ring-offset-1 ring-offset-black/40": token.isActive },
                 ),
               ),
               h.Style({
-                background: SEAT_COLORS[token.seat],
-                color: SEAT_INK[token.seat],
+                ...(logo === null
+                  ? { background: SEAT_COLORS[token.seat], color: SEAT_INK[token.seat] }
+                  : { borderColor: SEAT_COLORS[token.seat] }),
                 transform: `translate(${(dx * 100).toFixed(0)}%, ${(dy * 100).toFixed(0)}%)`,
               }),
             ],
-            [token.seat],
+            [
+              logo === null
+                ? token.seat
+                : h.img([h.Src(logo), h.Alt(""), h.Class("h-[62%] w-[62%] object-contain")]),
+            ],
           ),
         ],
       );
@@ -870,7 +901,14 @@ const centerCard = <M>(
         ),
         h.p(
           [h.Class("display mt-1 text-lg leading-tight text-ink sm:text-2xl")],
-          [winner === undefined ? "No winner" : `${winner.label} wins`],
+          [
+            winner === undefined
+              ? "No winner"
+              : h.span(
+                  [h.Class("inline-flex items-center gap-2")],
+                  [seatToken(h, winner, "md"), `${winner.label} wins`],
+                ),
+          ],
         ),
       ],
     );
@@ -891,7 +929,15 @@ const centerCard = <M>(
               ),
             ),
           ],
-          [h.p([h.Class("deed-kicker")], [`${lastEvent.seat} drew ${DECK_NAMES[lastEvent.deck]}`])],
+          [
+            h.p(
+              [h.Class("deed-kicker flex items-center gap-1.5")],
+              [
+                seatToken(h, seatPlayer(state.players, lastEvent.seat), "xs"),
+                `${seatPlayer(state.players, lastEvent.seat).label} drew ${DECK_NAMES[lastEvent.deck]}`,
+              ],
+            ),
+          ],
         ),
         h.p([h.Class("px-3 py-2.5 text-xs leading-snug text-ink sm:text-sm")], [card.text]),
       ],
@@ -906,7 +952,10 @@ const centerCard = <M>(
       h.div(
         [h.Class("flex flex-col items-center gap-2")],
         [
-          h.p([h.Class("deed-kicker text-ink-2")], [`${choice.seat} may buy or send to auction`]),
+          h.p(
+            [h.Class("flex flex-wrap items-center justify-center gap-1 text-xs text-ink-2")],
+            [playerTag(h, seatPlayer(state.players, choice.seat)), "may buy or send to auction"],
+          ),
           deedCardView(h, choice.property),
         ],
       ),
@@ -925,11 +974,17 @@ const centerCard = <M>(
                   "mt-1 rounded bg-paper-2 px-2 py-1 text-center text-xs font-semibold text-ink",
                 ),
               ],
-              [
-                auction.high === null
-                  ? "No bids yet"
-                  : `High bid ${money(auction.high.amount)} by ${auction.high.seat}`,
-              ],
+              auction.high === null
+                ? ["No bids yet"]
+                : [
+                    h.span(
+                      [h.Class("inline-flex flex-wrap items-center justify-center gap-1")],
+                      [
+                        `High bid ${money(auction.high.amount)} by`,
+                        playerTag(h, seatPlayer(state.players, auction.high.seat)),
+                      ],
+                    ),
+                  ],
             ),
           ),
         ],
@@ -941,9 +996,17 @@ const centerCard = <M>(
         [
           h.p([h.Class("deed-kicker text-red")], ["Raising funds"]),
           h.p(
-            [h.Class("display mt-1 text-base text-ink sm:text-lg")],
             [
-              `${debt.debtor} owes ${money(debt.amount)} to ${debt.creditor === "bank" ? "the bank" : debt.creditor}`,
+              h.Class(
+                "mt-1 flex flex-wrap items-center justify-center gap-1 text-sm text-ink sm:text-base",
+              ),
+            ],
+            [
+              playerTag(h, seatPlayer(state.players, debt.debtor)),
+              `owes ${money(debt.amount)} to`,
+              debt.creditor === "bank"
+                ? "the bank"
+                : playerTag(h, seatPlayer(state.players, debt.creditor)),
             ],
           ),
         ],
@@ -955,8 +1018,16 @@ const centerCard = <M>(
         [
           h.p([h.Class("deed-kicker text-ink-2")], [frameLabel(other._tag)]),
           h.p(
-            [h.Class("display mt-1 text-base text-ink sm:text-lg")],
-            [`Turn ${state.control.turn} · ${state.control.activeSeat} to play`],
+            [
+              h.Class(
+                "mt-1 flex flex-wrap items-center justify-center gap-1 text-sm text-ink sm:text-base",
+              ),
+            ],
+            [
+              `Turn ${state.control.turn} ·`,
+              playerTag(h, seatPlayer(state.players, state.control.activeSeat)),
+              "to play",
+            ],
           ),
         ],
       ),
