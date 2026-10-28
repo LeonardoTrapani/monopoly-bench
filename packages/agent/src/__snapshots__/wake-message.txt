@@ -1,0 +1,39 @@
+You are seat B (GPT-6.1 Sol). Opponents: A Claude Opus 5.5, C Bot (heuristic).
+
+## Since your last wake
+- Game fixture started: A (Claude Opus 5.5), B (GPT-6.1 Sol), C (Bot (heuristic)).
+- Turn 1, round 1: A to play.
+- The table is open.
+- Offer #1 from A to B: gives $250 for New York Avenue. "Completes my orange set; fair price."
+
+## Table
+Turn 1, round 1 of 120. Bank: 32 houses, 12 hotels.
+Now: Open table, round 2; waiting for B.
+Players:
+- A Claude Opus 5.5: $1,500 cash, on GO (0), net worth $1,860, to play.
+- B (you) GPT-6.1 Sol: $1,500 cash, on GO (0), net worth $2,100.
+- C Bot (heuristic): $640 cash, on GO (0), net worth $640, 1 Get Out of Jail Free card.
+Deeds (owner, buildings):
+- Brown: Mediterranean Avenue (1) unowned $60; Baltic Avenue (3) unowned $60
+- Light Blue: Oriental Avenue (6) unowned $100; Vermont Avenue (8) unowned $100; Connecticut Avenue (9) unowned $120
+- Pink: St. Charles Place (11) unowned $140; States Avenue (13) unowned $140; Virginia Avenue (14) unowned $160
+- Orange: St. James Place (16) A; Tennessee Avenue (18) A; New York Avenue (19) B
+- Red: Kentucky Avenue (21) unowned $220; Indiana Avenue (23) unowned $220; Illinois Avenue (24) unowned $240
+- Yellow: Atlantic Avenue (26) unowned $260; Ventnor Avenue (27) unowned $260; Marvin Gardens (29) unowned $280
+- Green: Pacific Avenue (31) unowned $300; North Carolina Avenue (32) unowned $300; Pennsylvania Avenue (34) unowned $320
+- Dark Blue: Park Place (37) unowned $350; Boardwalk (39) B mortgaged
+- Railroads: Reading Railroad (5) B; Pennsylvania Railroad (15) unowned $200; B. & O. Railroad (25) unowned $200; Short Line (35) unowned $200
+- Utilities: Electric Company (12) unowned $150; Water Works (28) unowned $150
+You follow: orange, dark-blue, railroads.
+
+## Decision
+Table round 2 of at most 6 (something was addressed to you; a new offer in a thread you are part of; a new offer involves a group you follow): answer offers or trade, then done.
+Table, round 2, turn 1.
+Legal now: mortgage, unmortgage, offer, accept, reject, message, follow, unfollow, done, inspect, note.
+End this wake with one of: done.
+
+## Offers and threads
+- #1 A → B, open: A gives $250; gets New York Avenue. "Completes my orange set; fair price."
+
+## Your notes
+A is collecting orange. Do not sell New York cheap.

@@ -1,0 +1,29 @@
+{
+  "name": "monopoly-bench",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "check": "vp check",
+    "test": "vp test",
+    "sim": "bun apps/cli/src/main.ts sim"
+  },
+  "devDependencies": {
+    "@oxlint/plugins": "1.89.0",
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2",
+    "vite-plus": "1.4.0"
+  },
+  "overrides": {
+    "@effect/platform-browser": "4.0.0",
+    "@effect/platform-bun": "4.0.0",
+    "@effect/platform-node": "4.0.0",
+    "@effect/platform-node-shared": "4.0.0",
+    "@effect/vitest": "4.0.0",
+    "effect": "4.0.0"
+  },
+  "packageManager": "bun@1.4.2"
+}

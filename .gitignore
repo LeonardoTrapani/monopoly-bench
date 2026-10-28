@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+.alchemy/
+.wrangler/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+/out/
+
+# local scratch scripts
+/.agent/
+
+# agent worktrees
+/.claude/worktrees/

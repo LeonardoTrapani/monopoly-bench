@@ -1,0 +1,35 @@
+{
+  "gameId": "sample-2p",
+  "seed": "sample-2p",
+  "seats": [
+    {
+      "seat": "A",
+      "label": "Bot (heuristic)",
+      "competitorId": "bot:heuristic"
+    },
+    {
+      "seat": "B",
+      "label": "Bot (random)",
+      "competitorId": "bot:random"
+    }
+  ],
+  "rules": {
+    "startingCash": 1500,
+    "goSalary": 200,
+    "jailFine": 50,
+    "houses": 32,
+    "hotels": 12,
+    "auctionMinOpening": 10,
+    "auctionMinRaise": 1,
+    "tableFrequency": "everyTurn",
+    "maxTableRounds": 6,
+    "maxOffersPerRound": 2,
+    "maxMessagesPerRound": 2,
+    "commentMaxChars": 280,
+    "notesMaxChars": 2000,
+    "maxRounds": 12,
+    "maxToolCallsPerWake": 24,
+    "maxInvalidPerWake": 6,
+    "wakeTimeoutMs": 180000
+  }
+}
