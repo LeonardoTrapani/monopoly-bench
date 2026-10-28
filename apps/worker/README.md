@@ -109,24 +109,25 @@ persist the conversation ourselves (`conversation` table in PlayerDO, one row pe
 
 ## Layout
 
-| Path                         | What                                                                |
-| ---------------------------- | ------------------------------------------------------------------- |
-| `alchemy.run.ts`             | Stack: Worker, DO namespaces, D1 (+ migrations), R2, secrets        |
-| `migrations/`                | D1 schema (SPEC §7.3): `0001_init.sql`, `0002_…` (funding, memory)  |
-| `src/worker.ts`              | Entry: `/api/*` → router, else assets; exports the DO classes       |
-| `src/api/`                   | Router, auth (bearer, cancel tokens), CORS/JSON helpers             |
-| `src/catalog.ts`             | Model catalog: OpenRouter list (1 h cache) or pi-ai's bundled list  |
-| `src/openrouter-key.ts`      | Own-key check with OpenRouter's `GET /api/v1/key`                   |
-| `src/archive.ts`             | Deleting a run's R2 archives                                        |
-| `src/db/`                    | D1 queries (read side), writes, ratings store (update and replay)   |
-| `src/runs/`                  | Run expansion, budget, RunDO logic (funding, purge)                 |
-| `src/game/engine.ts`         | **The engine seam** (interfaces GameDO depends on)                  |
-| `src/game/engine-binding.ts` | The seam bound to `@mb/engine`, `@mb/bots`, `@mb/agent`; D1 records |
-| `src/game/game-host.ts`      | GameDO logic                                                        |
-| `src/player/player-host.ts`  | PlayerDO logic                                                      |
-| `src/do/`                    | Thin `cloudflare:workers` adapters (`GameDO`, `PlayerDO`, `RunDO`)  |
-| `src/contracts.ts`           | Payloads between the Worker and the DOs, spectator messages         |
-| `src/testing/`               | `node:sqlite` fakes of D1 and DO SQLite, an in-memory R2 bucket     |
+| Path                         | What                                                                                 |
+| ---------------------------- | ------------------------------------------------------------------------------------ |
+| `alchemy.run.ts`             | Stack: Worker, DO namespaces, D1 (+ migrations), R2, secrets, domain                 |
+| `stacks/github.ts`           | CI credentials: scoped Cloudflare token and Actions secrets                          |
+| `migrations/`                | D1 schema (SPEC §7.3): `0001_init.sql`, `0002_…` (funding, memory), `0003_…` (names) |
+| `src/worker.ts`              | Entry: `/api/*` → router, else assets; exports the DO classes                        |
+| `src/api/`                   | Router, auth (bearer, cancel tokens), CORS/JSON helpers                              |
+| `src/catalog.ts`             | Model catalog: OpenRouter list (1 h cache) or pi-ai's bundled list                   |
+| `src/openrouter-key.ts`      | Own-key check with OpenRouter's `GET /api/v1/key`                                    |
+| `src/archive.ts`             | Deleting a run's R2 archives                                                         |
+| `src/db/`                    | D1 queries (read side), writes, ratings store (update and replay)                    |
+| `src/runs/`                  | Run expansion, budget, RunDO logic (funding, purge)                                  |
+| `src/game/engine.ts`         | **The engine seam** (interfaces GameDO depends on)                                   |
+| `src/game/engine-binding.ts` | The seam bound to `@mb/engine`, `@mb/bots`, `@mb/agent`; D1 records                  |
+| `src/game/game-host.ts`      | GameDO logic                                                                         |
+| `src/player/player-host.ts`  | PlayerDO logic                                                                       |
+| `src/do/`                    | Thin `cloudflare:workers` adapters (`GameDO`, `PlayerDO`, `RunDO`)                   |
+| `src/contracts.ts`           | Payloads between the Worker and the DOs, spectator messages                          |
+| `src/testing/`               | `node:sqlite` fakes of D1 and DO SQLite, an in-memory R2 bucket                      |
 
 The hosts (`GameHost`, `PlayerHost`, `RunCoordinator`) take ports (SQL, D1, R2, other DOs,
 alarm, clock), so the unit tests run them against `node:sqlite` with the real migrations.
@@ -225,22 +226,45 @@ Tests: `bunx vp test` from the repo root (unit tests use `node:sqlite`, no worke
 
 ## Deploy
 
-1. **Cloudflare credentials** in an Alchemy profile (stored under `~/.alchemy/`, no env vars):
-   - interactive (OAuth or token): `bunx alchemy profile edit --add Cloudflare`
-   - non-interactive (CI):
-     `bunx alchemy profile edit --add Cloudflare --method stored --set apiToken=env:CLOUDFLARE_API_TOKEN --set accountId=<account id>`
-   - pick a profile with `--profile <name>` or `ALCHEMY_PROFILE`.
-2. **Secrets** in the environment or `apps/worker/.env`: `BENCH_API_KEY` (any long random
-   string; the run form and CLI send it as Bearer) and `OPENROUTER_API_KEY` (pays for
-   server-funded runs; own-key runs use the creator's key). Both are bound as `secret_text`.
-   Deploys fail if either is missing. The D1 migrations (`migrations/`) apply on deploy.
-3. **Build the web app**: `bun run --cwd apps/web build` (the stack serves `apps/web/dist`;
-   without it the placeholder page is deployed and a warning is printed).
-4. **Deploy**: `bun run --cwd apps/worker deploy` (stage `live_$USER` by default; pass
-   `--stage prod` for production). The first deploy with `Cloudflare.state()` bootstraps
-   Alchemy's state-store Worker in the account; set `ALCHEMY_STATE=local` to keep state in
-   `.alchemy/` instead.
-5. **Destroy**: `bun run --cwd apps/worker destroy` (add `--stage` as for deploy).
+GitHub Actions deploys, following [Alchemy's CI guide](https://alchemy.run/environments/ci/)
+(`.github/workflows/deploy.yml`):
+
+| Event                         | Stage         | URL                                                   |
+| ----------------------------- | ------------- | ----------------------------------------------------- |
+| push to `main`                | `prod`        | https://monopolybench.leotrapani.com (`PROD_DOMAIN`)  |
+| pull request opened / pushed  | `pr-<number>` | its workers.dev URL, posted as a comment on the PR    |
+| pull request closed or merged | `pr-<number>` | destroyed (the cleanup job refuses to destroy `prod`) |
+
+Every deploy runs `vp check` and `vp test` first (`ci.yml`), builds `apps/web`, checks the
+provider environment (`alchemy provider check-env`) and runs `alchemy deploy --stage <stage>`.
+The D1 migrations (`migrations/`, forward only: add, never rewrite) apply during the deploy.
+Each stage has its own Worker, Durable Objects, D1 database and R2 bucket. Workers Logs are on.
+
+**CI credentials** are code too (`stacks/github.ts`): the stack mints a Cloudflare API token
+scoped to this account (Workers, D1, R2, Secrets Store for Alchemy's state store) and to the
+`leotrapani.com` zone (read, to find it: attaching the domain is a Workers permission), and writes it with
+the account id, `BENCH_API_KEY` and `OPENROUTER_API_KEY` into the repository's Actions secrets.
+Deploy it once, and again to rotate any of them:
+
+1. An `admin` profile whose Cloudflare credential can create API tokens (OAuth cannot): an API
+   token with _Account API Tokens Edit_, _Workers Scripts Edit_, _Secrets Store Edit_,
+   _Account Settings Read_ and _Zone Read_ on `leotrapani.com`, or the Global API Key; and a
+   GitHub token that can write the repository's secrets (`gh auth token`):
+   `bunx alchemy profile create admin`, then
+   `bunx alchemy profile edit --profile admin --add Cloudflare --method stored --set apiToken=env:CF_ADMIN_TOKEN --set accountId=<account id>`
+   and `bunx alchemy profile edit --profile admin --add GitHub --method stored --set token=env:GH_TOKEN`.
+   Delete it afterwards (`bunx alchemy profile delete admin`) and revoke the admin token.
+2. `BENCH_API_KEY=… OPENROUTER_API_KEY=… bunx alchemy deploy --config stacks/github.ts --profile admin --stage prod`
+   from `apps/worker`. `BENCH_API_KEY` is any long random string (the run form and CLI send it
+   as Bearer); `OPENROUTER_API_KEY` pays for server-funded runs.
+
+**By hand** (any stage, e.g. a personal `live_$USER`): an Alchemy profile for the account
+(`bunx alchemy profile edit --add Cloudflare`, OAuth is fine), the two secrets in the
+environment or `apps/worker/.env`, `bun run --cwd apps/web build` (without it the placeholder
+page is deployed), then `bun run --cwd apps/worker deploy --stage <stage>`. State lives in
+Alchemy's state store in the Cloudflare account (`Cloudflare.state()`), shared with CI;
+`ALCHEMY_STATE=local` keeps it in `.alchemy/` instead. `bun run --cwd apps/worker destroy
+--stage <stage>` tears a stage down.
 
 ## Playing LLMs locally (CLI)
 

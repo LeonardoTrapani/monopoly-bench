@@ -56,8 +56,9 @@ Then open the site and use **Start a run** with your own OpenRouter key, or `POS
 with `Authorization: Bearer dev-bench-key` to use the server's `OPENROUTER_API_KEY` (without
 it in the environment, server-funded LLM seats fall back to the default move).
 
-Deploying to Cloudflare needs an Alchemy Cloudflare profile and the `BENCH_API_KEY` and
-`OPENROUTER_API_KEY` secrets: see [apps/worker/README.md](apps/worker/README.md#deploy).
+Merging to `main` deploys https://monopolybench.leotrapani.com and every pull request gets a
+preview stage, through GitHub Actions and Alchemy: see
+[apps/worker/README.md](apps/worker/README.md#deploy).
 
 ## Layout
 
