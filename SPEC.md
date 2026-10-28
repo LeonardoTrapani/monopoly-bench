@@ -208,6 +208,11 @@ Engine-only steps (dice, movement, rent, taxes, card effects, bankruptcy transfe
 inside `decide` without frames that wait for input. Multi-creditor cards (pay each
 player, collect from each player) create one `Debt` per pair, in turn order.
 
+In the implementation one `RaiseFunds` frame carries the debt (debtor, creditor,
+amount, reason). Engine work that must wait behind an interactive frame (the remaining
+payments of a card, the auctions after a bankruptcy, a move after the forced jail fine)
+is stored in that frame's `after` list of tasks and runs when the frame closes.
+
 ### 4.3 Rounds, drafts and fixed order
 
 Session frames (`Table`, `RaiseFunds`), auctions and building auctions run in
@@ -257,6 +262,12 @@ answers; stale ids are rejected).
 `give`/`get` = `{ cash, properties[], jailCards }`. `to` omitted = open offer: any
 other seat may accept it.
 
+Implementation notes: decision ids are `<frameId>.<round>.<seat>` (unique per frame,
+round and seat; single-actor frames have round 1). `AbortGame` is the only command
+without `seat`/`decisionId`. `DeclareBankruptcy` is legal only when the debtor's
+liquidation value (after its own drafts) is below the debt: a debtor who can still pay
+from the bank must raise the money (its `Done` liquidates automatically, §5.2).
+
 ### 4.5 Events
 
 Every event has `seq`, `turn`, and `visibility`: `public`, or `{ seats: Seat[] }`.
@@ -264,6 +275,13 @@ Drafts and follows are private to their seat; offers, comments and outcomes are
 public. Spectators see everything. The full list is the `GameEvent` union in
 `packages/engine/src/schema/events.ts`; the viewer must be able to rebuild every
 screen from events alone.
+
+`DecksShuffled` (initial deck order) is visible to spectators only (`{ seats: [] }`).
+Control changes are explicit events (`FramePushed`, `FramePopped`, `RoundOpened`,
+`RoundClosed`, ...), so `evolve` stays a plain fold. A `BuildingSold` carries every level
+change of one sale (a hotel sold during a house shortage also lowers its siblings) so
+that every intermediate state builds evenly; on bankruptcy the asset events come
+before `PlayerBankrupt` for the same reason.
 
 ### 4.6 Views
 
@@ -300,6 +318,10 @@ on Tennessee Avenue", "Auction: B won Tennessee Avenue for $200") for the wake m
   the debt automatically if the debtor's cash covers it. `Done` by the debtor with the
   debt unpaid and nothing left to sell or mortgage ⇒ bankruptcy; with assets left ⇒
   the engine liquidates automatically (§6.5) and declares bankruptcy only if still short.
+  Since every round ends with `Done`, the debtor counts as finished when a round closes
+  in which it used no trade command and nothing new is addressed to it (so it can wait
+  one round for an answer to its own offer); `maxTableRounds` also bounds this session.
+  A debtor who owns no deed and no jail card is bankrupt at once, without a session.
 
 ### 5.3 Wake rules
 
@@ -331,6 +353,13 @@ the current leader. A session ends when the next round would wake nobody, or aft
   messages; `commentMaxChars` per comment.
 - Receiving mortgaged deeds pushes a `MortgagedTransfer` frame for the receiver after
   the round closes.
+- A trade must leave each side able to pay the 10% interest on the mortgaged deeds it
+  receives, so trades never open debts. A failed acceptance closes the offer when the
+  proposer's side no longer holds; when only the acceptor's side fails, the offer stays
+  open.
+- Open offers: a `Reject` from a seat other than the proposer records the refusal and
+  wakes the proposer, but the offer stays open for the others. An open offer may ask
+  only for deeds of a single other owner (only that owner can accept it).
 
 ### 5.5 Auctions
 
@@ -338,7 +367,16 @@ Round 1 wakes every eligible bidder (not bankrupt) at the same time with the cur
 high bid (none). Each submits `Bid{ amount }` (≥ $10 opening, ≥ high + $1 later) or
 `PassBid` (out for this auction). Highest bid in a round leads; ties are broken by fixed
 order. A bid must not exceed the bidder's liquidation value (cash + mortgage values +
-half building value); a winner short of cash enters `Debt` to the bank.
+half building value); a winner short of cash enters `Debt` to the bank. Seats whose
+liquidation value is below the opening bid are not woken.
+
+**Building auctions** (§4.3 step 4) use the same rounds, one scarce unit at a time,
+among the requesters whose requests are not yet covered. The bid is a **premium** paid
+to the bank on top of the normal building cost (deviation: with a total-price bid a
+$200 house could be won for $10), limited to the bidder's cash minus its cheapest
+requested building. Once supply covers the remaining requests, or only one requester
+is left, units are granted without bidding; a unit nobody bids on ends the building
+auction and the remaining units are not sold this round.
 
 ### 5.6 Text
 
@@ -501,8 +539,12 @@ Routes:
 
 ## 10. CLI (`apps/cli`)
 
-- `mb sim [--players N] [--seed S] [--bots random,heuristic,...] [--max-rounds R] [--llm <openrouter id>...]`
-  — run a game in-process and print the standings; writes `out/<gameId>.jsonl`.
+- `mb sim [--players N] [--seed S] [--bots random,heuristic,...] [--max-rounds R] [--table-frequency F] [--game-id ID] [--out DIR] [--no-out] [--verify] [--llm <openrouter id>...]`
+  — run a game in-process and print the standings; writes `out/<gameId>.events.jsonl`
+  (one encoded event per line) and `out/<gameId>.config.json`. `--llm` is not
+  implemented yet (bots only).
+- `mb calibrate [--games N] [--players 2,3,4,5,6] [--bot heuristic] [--cap R]` — natural
+  game length distribution of bot games, used for `maxRounds` (§12).
 - `mb run create <config.json>` / `mb run status <id>` — remote, uses `BENCH_API_KEY`
   and `BENCH_URL`.
 
@@ -524,16 +566,31 @@ Routes:
 
 ## 12. Defaults
 
-| Setting                                     | Default                                     |
-| ------------------------------------------- | ------------------------------------------- |
-| `startingCash` / `goSalary` / `jailFine`    | 1500 / 200 / 50                             |
-| `houses` / `hotels`                         | 32 / 12                                     |
-| `auctionMinOpening` / `auctionMinRaise`     | 10 / 1                                      |
-| `tableFrequency`                            | `everyTurn`                                 |
-| `maxTableRounds`                            | 6                                           |
-| `maxOffersPerRound` / `maxMessagesPerRound` | 2 / 2                                       |
-| `commentMaxChars` / `notesMaxChars`         | 280 / 2000                                  |
-| `maxRounds`                                 | 100 (to be calibrated with bot simulations) |
-| `maxToolCallsPerWake` / `maxInvalidPerWake` | 24 / 6                                      |
-| `wakeTimeoutMs`                             | 180 000                                     |
-| run `concurrency`                           | 2                                           |
+| Setting                                     | Default                     |
+| ------------------------------------------- | --------------------------- |
+| `startingCash` / `goSalary` / `jailFine`    | 1500 / 200 / 50             |
+| `houses` / `hotels`                         | 32 / 12                     |
+| `auctionMinOpening` / `auctionMinRaise`     | 10 / 1                      |
+| `tableFrequency`                            | `everyTurn`                 |
+| `maxTableRounds`                            | 6                           |
+| `maxOffersPerRound` / `maxMessagesPerRound` | 2 / 2                       |
+| `commentMaxChars` / `notesMaxChars`         | 280 / 2000                  |
+| `maxRounds`                                 | 120 (calibrated, see below) |
+| `maxToolCallsPerWake` / `maxInvalidPerWake` | 24 / 6                      |
+| `wakeTimeoutMs`                             | 180 000                     |
+| run `concurrency`                           | 2                           |
+
+**`maxRounds` calibration.** `bun apps/cli/src/main.ts calibrate --games 200 --cap 400
+--seed cal`: 200 all-heuristic games per player count, default rules, natural length in
+full rounds (every game ended by bankruptcies before the 400-round cap):
+
+| Players | p50 | p90 | p95 | p99 | max | ≤ 100 | ≤ 150 |
+| ------- | --- | --- | --- | --- | --- | ----- | ----- |
+| 2       | 73  | 105 | 116 | 140 | 283 | 88.0% | 99.5% |
+| 3       | 58  | 86  | 105 | 132 | 212 | 94.0% | 99.0% |
+| 4       | 55  | 91  | 100 | 133 | 157 | 95.0% | 99.5% |
+| 5       | 48  | 75  | 94  | 137 | 183 | 96.0% | 99.5% |
+| 6       | 44  | 71  | 86  | 129 | 192 | 98.0% | 99.5% |
+
+120 rounds is above the 95th percentile for every player count (the largest is 116,
+with 2 players), so about 95% or more of heuristic games end naturally.

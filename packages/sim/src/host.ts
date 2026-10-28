@@ -15,7 +15,6 @@ import {
   newGame,
   pendingSeats,
   playerView,
-  requestOf,
   standings,
   timeoutCommand,
 } from "@mb/engine";
@@ -114,7 +113,10 @@ export class Host {
 
   /** Builds the wake of `seat` (request, view, digest) and advances its digest cursor. */
   wake(seat: Seat): Wake | null {
-    const request = requestOf(this.state, seat);
+    if (decisionIdOf(this.state, seat) === null) return null;
+
+    const view = playerView(this.state, seat);
+    const request = view.request;
 
     if (request === null) return null;
 
@@ -126,7 +128,7 @@ export class Host {
 
     if (this.wakes > MAX_WAKES) throw new Error("The game did not terminate");
 
-    return { request, view: playerView(this.state, seat), digest: lines };
+    return { request, view, digest: lines };
   }
 
   /**

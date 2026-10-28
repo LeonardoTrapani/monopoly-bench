@@ -174,6 +174,37 @@ describe("building at the table", () => {
     expect(eventsOf(events, "ActionDropped")).toHaveLength(2);
     expect(cash(state, "B")).toBe(1500 - 10 - 50);
   });
+
+  it("leaves scarce units unsold when nobody bids for them", () => {
+    const setup = own(own(startGame(2), "A", ["mediterranean-avenue", "baltic-avenue"]), "B", [
+      "oriental-avenue",
+      "vermont-avenue",
+      "connecticut-avenue",
+    ]);
+
+    const scarce = { ...setup, bank: { houses: 1, hotels: 12 } };
+
+    const drafted = play(
+      scarce,
+      answerFor(scarce, "A", "Build", { property: "mediterranean-avenue" }),
+      answerFor(scarce, "B", "Build", { property: "oriental-avenue" }),
+      answerFor(scarce, "A", "Done", {}),
+      answerFor(scarce, "B", "Done", {}),
+    ).state;
+
+    const ready = withDice(drafted, [1, 2]);
+
+    const { state, events } = play(
+      ready,
+      answerFor(ready, "A", "PassBid", {}),
+      answerFor(ready, "B", "PassBid", {}),
+    );
+
+    expect(eventsOf(events, "BuildingUnitAuctioned")[0]?.winner).toBeNull();
+    expect(levelOf(state, "mediterranean-avenue")).toBe(0);
+    expect(levelOf(state, "oriental-avenue")).toBe(0);
+    expect(state.bank.houses).toBe(1);
+  });
 });
 
 describe("offers", () => {
@@ -241,6 +272,10 @@ describe("offers", () => {
     );
 
     expect(eventsOf(paidOff.events, "PropertyUnmortgaged")[0]?.amount).toBe(33);
+
+    const timedOut = play(withDice(accepted, [1, 2]), answerFor(accepted, "A", "TimeoutSeat", {}));
+
+    expect(eventsOf(timedOut.events, "MortgagedDeedDecided")[0]?.choice).toBe("keep");
   });
 
   it("limits new offers per round and comment length", () => {

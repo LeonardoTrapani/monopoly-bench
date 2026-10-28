@@ -1,15 +1,39 @@
 /** Player and spectator views (SPEC §4.6). */
 import { effectiveFollows, topFrame } from "./access.ts";
 import { pending, requestOf } from "./pending.ts";
-import { netWorth } from "./rules.ts";
+import { PROPERTIES } from "./data/board.ts";
 import { standings } from "./standings.ts";
 
 import type { Seat } from "./schema/common.ts";
 import type { GameState } from "./schema/state.ts";
 import type { PlayerView, PublicPlayer, SpectatorView } from "./schema/views.ts";
 
-const publicPlayers = (state: GameState): ReadonlyArray<PublicPlayer> =>
-  state.players.map((current) => ({
+/** Net worth of every seat in one pass over the deeds (same valuation as `netWorth`). */
+const worths = (state: GameState): ReadonlyMap<Seat, number> => {
+  const totals = new Map<Seat, number>();
+
+  for (const current of state.players) totals.set(current.seat, current.cash);
+
+  for (const [index, property] of state.properties.entries()) {
+    const info = PROPERTIES[index];
+
+    if (property.owner === null || info === undefined) continue;
+
+    const deedValue = property.mortgaged ? info.mortgage : info.price;
+
+    totals.set(
+      property.owner,
+      (totals.get(property.owner) ?? 0) + deedValue + info.houseCost * property.level,
+    );
+  }
+
+  return totals;
+};
+
+const publicPlayers = (state: GameState): ReadonlyArray<PublicPlayer> => {
+  const totals = worths(state);
+
+  return state.players.map((current) => ({
     seat: current.seat,
     label: current.label,
     competitorId: current.competitorId,
@@ -20,8 +44,9 @@ const publicPlayers = (state: GameState): ReadonlyArray<PublicPlayer> =>
     jailCards: current.jailCards,
     bankrupt: current.bankrupt,
     bankruptAtTurn: current.bankruptcy?.turn ?? null,
-    netWorth: current.bankrupt ? 0 : netWorth(state, current.seat),
+    netWorth: current.bankrupt ? 0 : (totals.get(current.seat) ?? current.cash),
   }));
+};
 
 const tableOf = (state: GameState) => ({
   gameId: state.config.gameId,

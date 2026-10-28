@@ -55,6 +55,25 @@ describe("turn flow", () => {
     expect(state.control.activeSeat).toBe("A");
   });
 
+  it("opens the table once per full round with tableFrequency everyRound", () => {
+    const rentToB = own(startGame(2, { tableFrequency: "everyRound" }), "B", ["baltic-avenue"]);
+    const { state, events } = rollFromTable(rentToB, [1, 2]);
+    const turnOfB = events.findIndex((event) => Predicate.isTagged(event, "TurnStarted"));
+
+    const tablesAfter = eventsOf(events.slice(turnOfB), "FramePushed").filter((pushed) =>
+      Predicate.isTagged(pushed.frame, "Table"),
+    );
+
+    expect(state.control.activeSeat).toBe("B");
+    expect(tablesAfter).toHaveLength(0);
+  });
+
+  it("never opens the table with tableFrequency off", () => {
+    const state = newGame(testConfig(2, { tableFrequency: "off" })).state;
+
+    expect(state.control.stack.some((frame) => Predicate.isTagged(frame, "Table"))).toBe(false);
+  });
+
   it("rolls, moves and offers an unowned deed", () => {
     const { state, events } = rollFromTable(startGame(2), [1, 2]);
 
