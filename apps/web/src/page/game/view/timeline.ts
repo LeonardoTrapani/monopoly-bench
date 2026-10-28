@@ -240,8 +240,8 @@ export const worthChartView = (
     [h.Class("space-y-2")],
     [
       lineChart(h, {
-        width: 640,
-        height: 260,
+        width: 480,
+        height: 250,
         series,
         xLabel: "turn",
         formatX: (value) => `${Math.round(value)}`,

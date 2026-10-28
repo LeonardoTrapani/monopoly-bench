@@ -19,6 +19,7 @@ import type { Html, HtmlBuilder } from "foldkit/html";
 
 import {
   BOARD,
+  CELL,
   CORNER,
   MARGIN,
   SPACE_RECTS,
@@ -44,11 +45,17 @@ const SPACE_FILL = "var(--board)";
 
 const RED = "#d32027";
 
-const NAME_FONT = 11.5;
+const NAME_FONT = 14;
 
-const NAME_LINE = 12.5;
+const NAME_LINE = 15;
 
-const MAX_LINE_CHARS = 12;
+const MAX_LINE_CHARS = 11;
+
+/** Average glyph width of the condensed uppercase board face, in ems. */
+const GLYPH_EM = 0.5;
+
+/** Widest a name line may be inside a space. */
+const MAX_LINE_WIDTH = CELL - 8;
 
 const fixed = (value: number): string => value.toFixed(1);
 
@@ -86,6 +93,12 @@ const textLines = <M>(
         h.Y(fixed(top + index * NAME_LINE)),
         h.Attribute("text-anchor", "middle"),
         h.Attribute("font-size", `${size}`),
+        ...(line.length * size * GLYPH_EM > MAX_LINE_WIDTH
+          ? [
+              h.Attribute("textLength", `${MAX_LINE_WIDTH}`),
+              h.Attribute("lengthAdjust", "spacingAndGlyphs"),
+            ]
+          : []),
         h.Class(className),
         h.Fill(INK),
       ],
@@ -389,7 +402,7 @@ const streetSpace = <M>(
               h.X("0"),
               h.Y(fixed(frame.height / 2 - 9)),
               h.Attribute("text-anchor", "middle"),
-              h.Attribute("font-size", "12"),
+              h.Attribute("font-size", "14"),
               h.Class("board-text"),
               h.Fill(INK),
             ],
@@ -471,8 +484,8 @@ const corners = <M>(h: HtmlBuilder<M>): ReadonlyArray<Html> => {
           h.StrokeWidth("1.5"),
         ]),
         cornerText(h, far + half, far + half, -45, [
-          label(h, "COLLECT $200", -26, 10),
-          label(h, "SALARY AS YOU PASS", -14, 10),
+          label(h, "COLLECT $200", -28, 12),
+          label(h, "SALARY AS YOU PASS", -15, 12),
           h.text(
             [
               h.X("0"),
@@ -529,10 +542,10 @@ const corners = <M>(h: HtmlBuilder<M>): ReadonlyArray<Html> => {
             h.Attribute("opacity", "0.55"),
           ]),
         ),
-        cornerText(h, CORNER - jailBox / 2, far + jailBox / 2, 45, [label(h, "IN JAIL", 5, 13)]),
-        cornerText(h, (CORNER - jailBox) / 2, far + CORNER / 2 - 6, 90, [label(h, "JUST", 4, 11)]),
+        cornerText(h, CORNER - jailBox / 2, far + jailBox / 2, 45, [label(h, "IN JAIL", 5, 15)]),
+        cornerText(h, (CORNER - jailBox) / 2, far + CORNER / 2 - 6, 90, [label(h, "JUST", 4, 13)]),
         cornerText(h, CORNER / 2 + 4, far + CORNER - (CORNER - jailBox) / 2 + 1, 0, [
-          label(h, "VISITING", 4, 11),
+          label(h, "VISITING", 4, 13),
         ]),
       ],
     ),
@@ -550,7 +563,7 @@ const corners = <M>(h: HtmlBuilder<M>): ReadonlyArray<Html> => {
           h.StrokeWidth("1.5"),
         ]),
         cornerText(h, half, half, 135, [
-          label(h, "FREE", -24, 14),
+          label(h, "FREE", -26, 17),
           h.g(
             [h.Attribute("transform", "translate(0 0)")],
             [
@@ -565,7 +578,7 @@ const corners = <M>(h: HtmlBuilder<M>): ReadonlyArray<Html> => {
               h.circle([h.Cx("13"), h.Cy("7"), h.R("5"), h.Fill(INK)]),
             ],
           ),
-          label(h, "PARKING", 30, 14),
+          label(h, "PARKING", 34, 17),
         ]),
       ],
     ),
@@ -583,14 +596,14 @@ const corners = <M>(h: HtmlBuilder<M>): ReadonlyArray<Html> => {
           h.StrokeWidth("1.5"),
         ]),
         cornerText(h, far + half, half, -135, [
-          label(h, "GO TO", -22, 14),
+          label(h, "GO TO", -24, 17),
           h.path([
             h.D("M-16 -4 h32 v20 h-32 z M-8 -4 v20 M0 -4 v20 M8 -4 v20"),
             h.Fill("none"),
             h.Stroke(INK),
             h.StrokeWidth("2.2"),
           ]),
-          label(h, "JAIL", 34, 14),
+          label(h, "JAIL", 37, 17),
         ]),
       ],
     ),

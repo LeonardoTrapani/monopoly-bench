@@ -129,3 +129,10 @@ export const ordinal = (place: number): string => {
 /** Singular or plural noun: `1 game`, `3 games`. */
 export const plural = (count: number, noun: string, pluralNoun = `${noun}s`): string =>
   `${integer(count)} ${count === 1 ? noun : pluralNoun}`;
+
+/** Why a game ended, in words. */
+export const END_REASON_TEXT = {
+  lastPlayerStanding: "last player standing",
+  turnCap: "ended at the turn cap",
+  aborted: "aborted",
+} as const satisfies Readonly<Record<string, string>>;

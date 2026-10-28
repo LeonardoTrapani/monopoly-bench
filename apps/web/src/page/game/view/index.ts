@@ -5,7 +5,7 @@ import { Option } from "effect";
 import { AsyncData, Submodel } from "foldkit";
 import type { Html, HtmlBuilder } from "foldkit/html";
 
-import { timestamp } from "../../../domain/format.ts";
+import { END_REASON_TEXT, timestamp } from "../../../domain/format.ts";
 import { turnIndexAt } from "../../../domain/replay.ts";
 import { gamesRouter, runHref } from "../../../route.ts";
 import { deedCard, errorView, gameStatusBadge, loadingView } from "../../../view/ui.ts";
@@ -25,12 +25,6 @@ const TABS: ReadonlyArray<readonly [Tab, string]> = [
   ["Reasoning", "Reasoning"],
   ["Log", "Event log"],
 ];
-
-const END_REASON_TEXT: Readonly<Record<NonNullable<GameSummary["endReason"]>, string>> = {
-  lastPlayerStanding: "last player standing",
-  turnCap: "ended at the turn cap",
-  aborted: "aborted",
-};
 
 const shortId = (gameId: string): string =>
   gameId.length > 14 ? `${gameId.slice(0, 12)}…` : gameId;
@@ -182,7 +176,7 @@ const readyView = (
     [h.Class("space-y-6")],
     [
       h.div(
-        [h.Class("grid gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]")],
+        [h.Class("grid gap-6 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]")],
         [
           h.div(
             [h.Class("space-y-4")],
@@ -219,7 +213,7 @@ const readyView = (
         ],
       ),
       h.div(
-        [h.Class("grid gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]")],
+        [h.Class("grid gap-6 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]")],
         [
           h.div(
             [],
@@ -252,7 +246,7 @@ export const view = Submodel.defineView<Model, Message>((model, h) => {
       Timeline.match(model.timeline, {
         Loading: () =>
           h.div(
-            [h.Class("grid gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]")],
+            [h.Class("grid gap-6 lg:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]")],
             [
               h.div([h.Class("deed aspect-square animate-pulse bg-board")]),
               loadingView(h, "Loading the game…", 6),

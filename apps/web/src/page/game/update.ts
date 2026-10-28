@@ -289,8 +289,9 @@ const connectionLost = (model: Model, error: string): UpdateReturn => {
   };
 };
 
-const reloadIfEmpty = <A, E>(data: AsyncData.AsyncData<A, E>): AsyncData.AsyncData<A, E> =>
-  AsyncData.hasData(data) ? data : reload(data);
+/** Retries only loads that failed (a pending or loaded value is left alone). */
+const reloadFailed = <A, E>(data: AsyncData.AsyncData<A, E>): AsyncData.AsyncData<A, E> =>
+  AsyncData.hasError(data) ? reload(data) : data;
 
 const decodeSeatFilter = Schema.decodeUnknownOption(SeatFilterValue);
 
@@ -482,21 +483,21 @@ export const update = (model: Model, message: Message) =>
 
     ClickedRetry: () => {
       const commands = [
-        ...(AsyncData.hasData(model.summary) ? [] : [FetchSummary({ gameId: model.gameId })]),
+        ...(AsyncData.isFailure(model.summary) ? [FetchSummary({ gameId: model.gameId })] : []),
         ...Timeline.matchOrElse(
           model.timeline,
           { Failed: () => [FetchReplay({ gameId: model.gameId })] },
           () => [],
         ),
-        ...(AsyncData.hasData(model.transcripts)
-          ? []
-          : [FetchTranscripts({ gameId: model.gameId })]),
+        ...(AsyncData.hasError(model.transcripts)
+          ? [FetchTranscripts({ gameId: model.gameId })]
+          : []),
       ];
 
       return {
         model: modifyFields(model, {
-          summary: reloadIfEmpty,
-          transcripts: reloadIfEmpty,
+          summary: reloadFailed,
+          transcripts: reloadFailed,
           timeline: (timeline) =>
             Timeline.matchOrElse(timeline, { Failed: () => Timeline.Loading() }, () => timeline),
         }),

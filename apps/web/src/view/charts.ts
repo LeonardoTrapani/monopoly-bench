@@ -366,7 +366,8 @@ export const scatterChart = <M>(h: HtmlBuilder<M>, config: ScatterConfig<M>): Ht
     const labelStart = labelOnLeft ? cx - 9 - labelWidth : cx + 9;
 
     const collides = placedLabels.some(
-      ([x, y, width]) => Math.abs(y - cy) < 12 && labelStart < x + width && x < labelStart + labelWidth,
+      ([x, y, width]) =>
+        Math.abs(y - cy) < 12 && labelStart < x + width && x < labelStart + labelWidth,
     );
 
     if (!collides) placedLabels.push([labelStart, cy, labelWidth]);
@@ -391,20 +392,24 @@ export const scatterChart = <M>(h: HtmlBuilder<M>, config: ScatterConfig<M>): Ht
         collides
           ? h.empty
           : h.text(
-          [
-            h.X(numberAttr(labelOnLeft ? cx - 9 : cx + 9)),
-            h.Y(numberAttr(cy + 3.5)),
-            h.Attribute("text-anchor", labelOnLeft ? "end" : "start"),
-            h.Class(
-              point.isMuted ? "fill-muted text-[10.5px]" : "fill-ink-2 text-[10.5px] font-semibold",
+              [
+                h.X(numberAttr(labelOnLeft ? cx - 9 : cx + 9)),
+                h.Y(numberAttr(cy + 3.5)),
+                h.Attribute("text-anchor", labelOnLeft ? "end" : "start"),
+                h.Class(
+                  point.isMuted
+                    ? "fill-muted text-[10.5px]"
+                    : "fill-ink-2 text-[10.5px] font-semibold",
+                ),
+              ],
+              [point.label],
             ),
-          ],
-          [point.label],
-        ),
       ],
     );
 
-    return point.href === null ? dot : h.a([h.Attribute("href", point.href), h.AriaLabel(point.tooltip)], [dot]);
+    return point.href === null
+      ? dot
+      : h.a([h.Attribute("href", point.href), h.AriaLabel(point.tooltip)], [dot]);
   });
 
   return h.svg(
