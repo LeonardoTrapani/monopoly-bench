@@ -1,0 +1,15 @@
+{
+  "name": "@mb/cli",
+  "version": "0.0.0",
+  "private": true,
+  "bin": {
+    "mb": "./src/main.ts"
+  },
+  "type": "module",
+  "dependencies": {
+    "@mb/bots": "workspace:*",
+    "@mb/engine": "workspace:*",
+    "@mb/sim": "workspace:*",
+    "effect": "4.0.0"
+  }
+}

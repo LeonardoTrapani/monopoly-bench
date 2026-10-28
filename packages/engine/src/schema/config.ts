@@ -25,7 +25,7 @@ export const DEFAULT_RULES = {
   maxMessagesPerRound: 2,
   commentMaxChars: 280,
   notesMaxChars: 2000,
-  maxRounds: 100,
+  maxRounds: 120,
   maxToolCallsPerWake: 24,
   maxInvalidPerWake: 6,
   wakeTimeoutMs: 180_000,

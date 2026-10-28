@@ -11,6 +11,19 @@
         "vite-plus": "1.4.0",
       },
     },
+    "apps/cli": {
+      "name": "@mb/cli",
+      "version": "0.0.0",
+      "bin": {
+        "mb": "./src/main.ts",
+      },
+      "dependencies": {
+        "@mb/bots": "workspace:*",
+        "@mb/engine": "workspace:*",
+        "@mb/sim": "workspace:*",
+        "effect": "4.0.0",
+      },
+    },
     "packages/api": {
       "name": "@mb/api",
       "version": "0.0.0",
@@ -67,6 +80,8 @@
     "@mb/api": ["@mb/api@workspace:packages/api"],
 
     "@mb/bots": ["@mb/bots@workspace:packages/bots"],
+
+    "@mb/cli": ["@mb/cli@workspace:apps/cli"],
 
     "@mb/engine": ["@mb/engine@workspace:packages/engine"],
 

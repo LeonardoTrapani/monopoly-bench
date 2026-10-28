@@ -25,27 +25,33 @@ const checkDeck = (
   order: ReadonlyArray<number>,
   problems: Array<string>,
 ): void => {
-  const seen = Array.from({ length: DECK_SIZE }, () => 0);
+  // One bit per card: a duplicate or a missing card leaves the mask incomplete.
+  let mask = 0;
   let count = order.length;
+  let duplicate = false;
 
-  for (const card of order) seen[card] = (seen[card] ?? 0) + 1;
+  const mark = (card: number) => {
+    const bit = 1 << card;
+
+    duplicate ||= (mask & bit) !== 0 || card < 0 || card >= DECK_SIZE;
+    mask |= bit;
+  };
+
+  for (const card of order) mark(card);
 
   for (const current of state.players) {
     for (const held of current.jailCards) {
       if (held !== deck) continue;
 
-      const card = JAIL_CARD[deck];
-
-      seen[card] = (seen[card] ?? 0) + 1;
+      mark(JAIL_CARD[deck]);
       count += 1;
     }
   }
 
   const unshuffled = state.status === "setup" && count === 0;
+  const complete = count === DECK_SIZE && !duplicate && mask === (1 << DECK_SIZE) - 1;
 
-  if (!unshuffled && (count !== DECK_SIZE || seen.some((times) => times !== 1))) {
-    problems.push(`${deck}: deck is not a permutation`);
-  }
+  if (!unshuffled && !complete) problems.push(`${deck}: deck is not a permutation`);
 };
 
 /**

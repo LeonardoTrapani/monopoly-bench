@@ -114,6 +114,9 @@ const tradeGain = (
   const cashAfter = cashOf(view, seat) + receive.cash - pay.cash;
   const partnerCashAfter = cashOf(view, partner) - receive.cash + pay.cash;
   const groups = new Set<GroupId>();
+  // Strengthening one opponent hurts less when there are several: they compete with each other.
+  const opponents = Math.max(1, view.players.filter((player) => !player.bankrupt).length - 1);
+  const danger = 1 / Math.sqrt(opponents);
   let gain = receive.cash - pay.cash + 30 * (receive.jailCards - pay.jailCards);
 
   for (const id of receive.properties) {
@@ -126,6 +129,9 @@ const tradeGain = (
     groups.add(propertyInfo(id).group);
   }
 
+  let mine = 0;
+  let theirs = false;
+
   for (const group of groups) {
     if (group === "railroads" || group === "utilities") continue;
 
@@ -134,14 +140,19 @@ const tradeGain = (
 
     if (!completes(group, seat, before) && completes(group, seat, after)) {
       gain += price * (0.6 + buildable(cashAfter));
+      mine += price;
     }
 
     if (completes(group, seat, before) && !completes(group, seat, after)) gain -= price;
 
     if (!completes(group, partner, before) && completes(group, partner, after)) {
-      gain -= price * (0.6 + buildable(partnerCashAfter));
+      gain -= price * (0.6 + buildable(partnerCashAfter)) * danger;
+      theirs = true;
     }
   }
+
+  // A swap that completes a set on both sides unlocks building for both: worth doing.
+  if (mine > 0 && theirs) gain += mine * 0.25;
 
   return gain;
 };
@@ -443,6 +454,10 @@ const session = (
   if (best !== undefined) {
     commands.push(command("Accept", { ...answer(request), offerId: best.offer.id }));
     plan.addCash(seat, best.offer.give.cash - best.offer.get.cash);
+
+    for (const id of best.offer.give.properties) plan.update(id, { owner: seat });
+
+    for (const id of best.offer.get.properties) plan.update(id, { owner: best.offer.from });
   }
 
   for (const offer of open) {
@@ -487,7 +502,11 @@ const session = (
     }
   }
 
-  return [...commands, command("Done", answer(request))];
+  // Leave room for the terminal command within the per-wake limit.
+  return [
+    ...commands.slice(0, view.rules.maxToolCallsPerWake - 1),
+    command("Done", answer(request)),
+  ];
 };
 
 /** The `heuristic` policy for one seed. */
