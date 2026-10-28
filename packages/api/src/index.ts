@@ -311,7 +311,15 @@ export type WakeTranscript = typeof WakeTranscript.Type;
 
 /** Live per-seat activity pushed to spectators next to engine events. */
 export const SeatActivity = Schema.TaggedUnion({
-  WakeStarted: { seat: Seat, decisionId: Schema.String, frame: Schema.String, round: Schema.Int },
+  WakeStarted: {
+    seat: Seat,
+    decisionId: Schema.String,
+    frame: Schema.String,
+    round: Schema.Int,
+    turn: Schema.Int,
+    /** Why the seat was woken (engine `WakeReason` literals, SPEC §5.3). */
+    reasons: Schema.Array(Schema.String),
+  },
   ReasoningDelta: { seat: Seat, decisionId: Schema.String, text: Schema.String },
   ToolCalled: { seat: Seat, decisionId: Schema.String, call: ToolCallRecord },
   WakeFinished: {

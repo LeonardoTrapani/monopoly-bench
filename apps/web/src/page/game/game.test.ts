@@ -242,6 +242,8 @@ describe("viewer update", () => {
               ...decision,
               frame: "Table",
               round: 1,
+              turn: 1,
+              reasons: ["opening"],
             }),
           }),
         }),

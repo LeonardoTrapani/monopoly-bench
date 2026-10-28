@@ -164,6 +164,8 @@ export const runMixedGame = async (input: MixedGameInput): Promise<MixedGameResu
         decisionId: wake.request.decisionId,
         frame: wake.request.frame,
         round: wake.request.round,
+        turn: wake.request.turn,
+        reasons: wake.request.reasons,
       },
       model: access.model,
       streamFn: access.streamFn,

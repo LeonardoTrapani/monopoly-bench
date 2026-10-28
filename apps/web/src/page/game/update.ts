@@ -169,6 +169,7 @@ export const applyActivity = (
     frame,
     round,
     turn,
+    reasons: [],
     reasoning: "",
     toolCalls: [],
     usage: Option.none(),
@@ -184,8 +185,18 @@ export const applyActivity = (
         wakes,
         started.seat,
         started.decisionId,
-        () => blank(started.seat, started.decisionId, started.frame, started.round),
-        (wake) => ({ ...wake, frame: started.frame, round: started.round }),
+        () => ({
+          ...blank(started.seat, started.decisionId, started.frame, started.round),
+          turn: started.turn,
+          reasons: started.reasons,
+        }),
+        (wake) => ({
+          ...wake,
+          frame: started.frame,
+          round: started.round,
+          turn: started.turn,
+          reasons: started.reasons,
+        }),
       ),
     ReasoningDelta: (delta) =>
       updateWake(

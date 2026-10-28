@@ -90,7 +90,14 @@ const harness = (responses: ReadonlyArray<FauxResponseStep>, tokensPerSecond = 0
     calls,
     activity,
     input: (overrides) => ({
-      identity: { seat: "B", decisionId: "d-1", frame: "Table", round: 1 },
+      identity: {
+        seat: "B",
+        decisionId: "d-1",
+        frame: "Table",
+        round: 1,
+        turn: 1,
+        reasons: ["opening"],
+      },
       model: faux.getModel(),
       streamFn: priced,
       apiKey: "test-key",

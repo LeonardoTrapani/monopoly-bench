@@ -59,6 +59,8 @@ export const LiveWake = Schema.Struct({
   round: Schema.Int,
   /** Game turn when the wake started. */
   turn: Schema.Int,
+  /** Why the seat was woken (engine wake reasons). */
+  reasons: Schema.Array(Schema.String),
   reasoning: Schema.String,
   toolCalls: Schema.Array(ToolCallRecord),
   usage: Schema.Option(WakeUsage),

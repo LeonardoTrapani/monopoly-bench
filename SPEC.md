@@ -62,8 +62,8 @@ tools/oxlint/anti-slop/   vendored lint rules (see PROVENANCE.md)
 ```
 
 Commands from the repo root: `bun install`, `bunx vp check`, `bunx vp test`,
-`bun run sim -- --players 4 --seed 1` (local bot game), `bun --cwd apps/worker dev`
-(Alchemy local dev), `bun --cwd apps/worker deploy`.
+`bun run sim -- --players 4 --seed 1` (local bot game), `bun run --cwd apps/worker dev`
+(Alchemy local dev), `bun run --cwd apps/worker deploy`.
 
 ---
 

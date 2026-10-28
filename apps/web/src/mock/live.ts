@@ -176,7 +176,13 @@ export const liveFeed = (
           Queue.offerUnsafe(
             queue,
             activity(
-              SeatActivity.cases.WakeStarted.make({ ...ids, frame: wake.frame, round: wake.round }),
+              SeatActivity.cases.WakeStarted.make({
+                ...ids,
+                frame: wake.frame,
+                round: wake.round,
+                turn: wake.turn,
+                reasons: wake.reasons,
+              }),
             ),
           );
 

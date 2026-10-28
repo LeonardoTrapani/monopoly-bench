@@ -135,7 +135,7 @@ workerd with local D1, R2 and SQLite, and keeps Alchemy state in `apps/worker/.a
 
 ```sh
 bun install
-bun --cwd apps/web run build     # optional: without it a placeholder page is served
+bun run --cwd apps/web build     # optional: without it a placeholder page is served
 cd apps/worker && bun run dev    # http://localhost:1337 (next free port if taken)
 ```
 
@@ -176,13 +176,13 @@ Tests: `bunx vp test` from the repo root (unit tests use `node:sqlite`, no worke
 2. **Secrets** in the environment or `apps/worker/.env`: `BENCH_API_KEY` (any long random
    string; the run form and CLI send it as Bearer) and `OPENROUTER_API_KEY`. Both are bound
    as `secret_text`. Deploys fail if either is missing.
-3. **Build the web app**: `bun --cwd apps/web run build` (the stack serves `apps/web/dist`;
+3. **Build the web app**: `bun run --cwd apps/web build` (the stack serves `apps/web/dist`;
    without it the placeholder page is deployed and a warning is printed).
-4. **Deploy**: `bun --cwd apps/worker deploy` (stage `live_$USER` by default; pass
+4. **Deploy**: `bun run --cwd apps/worker deploy` (stage `live_$USER` by default; pass
    `--stage prod` for production). The first deploy with `Cloudflare.state()` bootstraps
    Alchemy's state-store Worker in the account; set `ALCHEMY_STATE=local` to keep state in
    `.alchemy/` instead.
-5. **Destroy**: `bun --cwd apps/worker destroy` (add `--stage` as for deploy).
+5. **Destroy**: `bun run --cwd apps/worker destroy` (add `--stage` as for deploy).
 
 ## Playing LLMs locally (CLI)
 

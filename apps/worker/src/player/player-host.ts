@@ -153,6 +153,8 @@ export class PlayerHost {
           decisionId: request.decisionId,
           frame: request.frame,
           round: request.round,
+          turn: request.turn,
+          reasons: request.reasons,
         },
         model: access.model,
         streamFn: access.streamFn,

@@ -54,7 +54,7 @@ export const fromLiveWake = (wake: LiveWake): WakeCard => ({
   turn: wake.turn,
   frame: wake.frame,
   round: wake.round,
-  reasons: [],
+  reasons: wake.reasons.flatMap((reason) => Option.toArray(decodeReason(reason))),
   reasoning: wake.reasoning,
   text: "",
   toolCalls: wake.toolCalls,

@@ -46,6 +46,8 @@ export interface WakeIdentity {
   readonly decisionId: string;
   readonly frame: string;
   readonly round: number;
+  readonly turn: number;
+  readonly reasons: ReadonlyArray<string>;
 }
 
 export interface WakeInput {
@@ -357,6 +359,8 @@ export const runWake = async (input: WakeInput): Promise<WakeResult> => {
       decisionId: input.identity.decisionId,
       frame: input.identity.frame,
       round: input.identity.round,
+      turn: input.identity.turn,
+      reasons: input.identity.reasons,
     }),
   );
 
