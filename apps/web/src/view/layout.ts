@@ -1,6 +1,7 @@
 /** The page frame: red wordmark banner with navigation, and the footer. */
 import type { GamesResponse } from "@mb/api";
 import clsx from "clsx";
+import githubIcon from "@lobehub/icons-static-svg/icons/github.svg";
 import { AsyncData } from "foldkit";
 import type { Html, HtmlBuilder } from "foldkit/html";
 
@@ -15,6 +16,8 @@ import {
   newRunRouter,
   runsRouter,
 } from "../route.ts";
+
+export const GITHUB_URL = "https://github.com/LeonardoTrapani/monopoly-bench";
 
 const isActive = (route: AppRoute, tags: ReadonlyArray<AppRoute["_tag"]>): boolean =>
   AppRoute.isAnyOf(tags)(route);
@@ -155,6 +158,17 @@ export const header = (model: Model, h: HtmlBuilder<Message>): Html => {
                   ),
                 ],
                 ["Start a run"],
+              ),
+              h.a(
+                [
+                  h.Href(GITHUB_URL),
+                  h.Target("_blank"),
+                  h.Rel("noopener noreferrer"),
+                  h.Title("Source on GitHub"),
+                  h.AriaLabel("Source on GitHub"),
+                  h.Class("inline-flex rounded-md p-1.5 hover:bg-black/15"),
+                ],
+                [h.img([h.Src(githubIcon), h.Alt(""), h.Class("size-6 brightness-0 invert")])],
               ),
             ],
           ),

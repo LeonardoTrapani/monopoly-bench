@@ -8,6 +8,10 @@ on:
   pull_request:
     types: [opened, reopened, synchronize, closed]
 
+# Least privilege by default; jobs that need more ask for it.
+permissions:
+  contents: read
+
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
@@ -20,9 +24,11 @@ jobs:
     if: ${{ github.event.action != 'closed' }}
     uses: ./.github/workflows/ci.yml
 
+  # Pull requests from forks never deploy or clean up: they get no secrets, and their code must
+  # never run with ours. Checks still run for them.
   deploy:
     needs: checks
-    if: ${{ github.event.action != 'closed' }}
+    if: ${{ github.event.action != 'closed' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -59,7 +65,7 @@ jobs:
 
   cleanup:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository }}
     timeout-minutes: 30
     permissions:
       contents: read
