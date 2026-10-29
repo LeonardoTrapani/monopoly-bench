@@ -4,6 +4,9 @@ name: CI
 on:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   check-and-test:
     runs-on: ubuntu-latest
