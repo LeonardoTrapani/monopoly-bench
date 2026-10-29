@@ -479,7 +479,10 @@ A wake that ends because the model call failed (OpenRouter refused or errored th
 `endReason: "modelError"`) also takes the default. After 3 such wakes in a row from one seat
 (`MAX_CONSECUTIVE_MODEL_ERRORS`) the game is aborted, so a seat whose model does not answer is
 never rated as if it played; the game's `abortReason` names the seat and the error, and seats
-count their `modelErrors`. Every request asks for at most 32 000 output tokens
+count their `modelErrors`. When the error is the model's own (not auth or credits 401/402/403,
+timeouts 408, rate limits 429, provider failures 5xx or an exhausted in-flight budget) the game
+also records that seat as `abort_seat`, and the leaderboard shows each model's `abortRate`:
+games it aborted / (rated games + games it aborted). Every request asks for at most 32 000 output tokens
 (`DEFAULT_MAX_OUTPUT_TOKENS`, or the model's own maximum if lower): OpenRouter refuses a
 request whose maximum output the account's credit cannot cover.
 

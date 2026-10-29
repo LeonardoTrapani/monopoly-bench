@@ -248,6 +248,7 @@ const setup = () => {
         status: "finished",
         endReason: "turnCap",
         abortReason: null,
+        abortSeat: null,
         winnerSeat: winnerSeat.seat,
         finishedAt,
         turn: 40,

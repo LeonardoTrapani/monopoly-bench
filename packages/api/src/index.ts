@@ -177,6 +177,10 @@ export const LeaderboardEntry = Schema.Struct({
   avgNetWorth: Schema.Number,
   invalidRate: Schema.Number,
   timeoutRate: Schema.Number,
+  /** Games this model aborted by failing wakes in a row (not credits, rate limits or outages). */
+  modelAborts: Schema.Int,
+  /** modelAborts / (rated games + modelAborts): how often it breaks a game it plays. */
+  abortRate: Schema.Number,
   costPerGameUsd: Schema.Number,
   avgWakeMs: Schema.Number,
 });
@@ -424,16 +428,17 @@ export const providerSlugOf = (model: string): string =>
   (model.split("/")[0] ?? model).replace(/^~/, "");
 
 /**
- * Cost model behind `estimatedSeatCostUsd` and the run form (measured on bot games and real
- * Claude Haiku 5.5 wakes, 2026-10-28): one seat of a full 4-player game makes ~225 wakes;
- * each wake re-reads ~70k cached tokens (the whole-game conversation, compacted at a fixed
- * budget), writes ~2k new tokens and produces ~1,260 output tokens with medium reasoning.
+ * Cost model behind `estimatedSeatCostUsd` and the run form, fitted on the 2,684 wakes of the
+ * finished production games (7 models, 3 and 4 players, 2026-10-28): one seat makes ~210
+ * wakes; each wake re-reads ~52k cached tokens (the whole-game conversation, compacted at a
+ * fixed budget), writes ~1.3k new tokens and produces ~220 output tokens. Most wakes are a
+ * plain roll-and-`done` with a few dozen output tokens; trades and auctions bring the mean up.
  */
 export const seatCostModel = {
-  wakesPerSeat: 225,
-  cachedTokensPerWake: 70_000,
-  freshTokensPerWake: 2_000,
-  outputTokensPerWake: 1_260,
+  wakesPerSeat: 210,
+  cachedTokensPerWake: 52_000,
+  freshTokensPerWake: 1_300,
+  outputTokensPerWake: 220,
 } as const;
 
 /** Rough USD for one seat over a full 4-player game; models without caching pay full input. */

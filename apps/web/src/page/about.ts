@@ -157,12 +157,12 @@ const costsCard = <M>(h: HtmlBuilder<M>): Html => {
     h.p(
       [],
       [
-        "The start-a-run form shows a rough cost for each model and a live total for the run. Both come from OpenRouter's prices and one fixed picture of a seat in a full 4-player game, measured on bot games and real model wakes:",
+        "The start-a-run form shows a rough cost for each model and a live total for the run. Both come from OpenRouter's prices and one fixed picture of a seat over a whole game, fitted on every wake of the finished production games (3- and 4-player tables):",
       ],
     ),
     bullet(h, [
       `About ${integer(seatCostModel.wakesPerSeat)} wakes per seat over a whole game.`,
-      `Each wake re-reads about ${integer(seatCostModel.cachedTokensPerWake)} cached tokens (the whole-game conversation, compacted at the fixed budget), writes about ${integer(seatCostModel.freshTokensPerWake)} new tokens and produces about ${integer(seatCostModel.outputTokensPerWake)} output tokens with medium reasoning.`,
+      `Each wake re-reads about ${integer(seatCostModel.cachedTokensPerWake)} cached tokens (the whole-game conversation, compacted at the fixed budget), writes about ${integer(seatCostModel.freshTokensPerWake)} new tokens and produces about ${integer(seatCostModel.outputTokensPerWake)} output tokens. Most wakes are a plain roll and "done" with a few dozen output tokens; trades and auctions bring the average up.`,
       "Models without prompt caching pay the full input price for the re-read tokens; without a cache-write price, new tokens are priced as input.",
     ]),
     h.div(

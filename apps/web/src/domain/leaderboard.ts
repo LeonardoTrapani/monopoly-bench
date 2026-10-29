@@ -11,6 +11,7 @@ export const SortColumn = Schema.Literals([
   "AvgPlace",
   "AvgNetWorth",
   "InvalidRate",
+  "AbortRate",
   "CostPerGame",
   "Latency",
 ]);
@@ -33,6 +34,7 @@ const LOWER_IS_BETTER: ReadonlyArray<SortColumn> = [
   "Model",
   "AvgPlace",
   "InvalidRate",
+  "AbortRate",
   "CostPerGame",
   "Latency",
 ];
@@ -96,6 +98,8 @@ const sortValue = (row: RankedEntry, column: SortColumn): number | string => {
   if (column === "AvgNetWorth") return row.entry.avgNetWorth;
 
   if (column === "InvalidRate") return row.entry.invalidRate;
+
+  if (column === "AbortRate") return row.entry.abortRate;
 
   if (column === "CostPerGame") return row.entry.costPerGameUsd;
 

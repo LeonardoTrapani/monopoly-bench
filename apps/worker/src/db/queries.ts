@@ -273,6 +273,11 @@ const WakeAggregate = Schema.Struct({
 
 type WakeAggregate = typeof WakeAggregate.Type;
 
+const ModelAbortRow = Schema.Struct({
+  competitor_id: Schema.String,
+  aborts: Schema.Int,
+});
+
 const HeadToHeadRow = Schema.Struct({
   a: Schema.String,
   b: Schema.String,
@@ -325,6 +330,12 @@ export const leaderboard = Effect.fn("leaderboard")(function* (playersCount: Pla
 
   const wakes = yield* wakeAggregates(playersCount);
 
+  const modelAborts = yield* decodeRows(ModelAbortRow)(sql`
+    SELECT s.competitor_id, COUNT(*) AS aborts
+    FROM games g JOIN seats s ON s.game_id = g.id AND s.seat = g.abort_seat
+    WHERE g.status = 'aborted' AND g.players_count = ${playersCount}
+    GROUP BY s.competitor_id`);
+
   const headToHead = yield* decodeRows(HeadToHeadRow)(sql`
     WITH placed AS (
       SELECT s.game_id, s.competitor_id, MIN(s.final_rank) AS rank
@@ -340,11 +351,13 @@ export const leaderboard = Effect.fn("leaderboard")(function* (playersCount: Pla
 
   const placementOf = new Map(placements.map((row) => [row.competitor_id, row]));
   const wakesOf = new Map(wakes.map((row) => [row.competitor_id, row]));
+  const abortsOf = new Map(modelAborts.map((row) => [row.competitor_id, row.aborts]));
 
   const entries = ratings.map((rating): LeaderboardEntry => {
     const placement = placementOf.get(rating.competitor_id);
     const usage = wakesOf.get(rating.competitor_id);
     const games = placement?.games ?? rating.games;
+    const aborts = abortsOf.get(rating.competitor_id) ?? 0;
 
     return {
       competitorId: rating.competitor_id,
@@ -359,6 +372,8 @@ export const leaderboard = Effect.fn("leaderboard")(function* (playersCount: Pla
       avgNetWorth: placement?.avg_net_worth ?? 0,
       invalidRate: invalidRate(usage),
       timeoutRate: timeoutRate(usage),
+      modelAborts: aborts,
+      abortRate: aborts === 0 ? 0 : aborts / (rating.games + aborts),
       costPerGameUsd: games === 0 ? 0 : (usage?.cost_usd ?? 0) / games,
       avgWakeMs: usage?.avg_wake_ms ?? 0,
     };

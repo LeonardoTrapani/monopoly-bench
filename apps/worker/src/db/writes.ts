@@ -301,6 +301,8 @@ export interface FinishedGame {
   readonly endReason: EndReason | null;
   /** Why an aborted game was stopped (`GameHost.abortGame`); null otherwise. */
   readonly abortReason: string | null;
+  /** The seat whose own model caused the abort; null for any other abort or game. */
+  readonly abortSeat: Seat | null;
   readonly winnerSeat: Seat | null;
   readonly finishedAt: string;
   readonly turn: number;
@@ -346,7 +348,7 @@ export const finishGame = Effect.fn("finishGame")(function* (game: FinishedGame)
 
   yield* batchAll([
     sql`UPDATE games SET status = ${game.status}, end_reason = ${game.endReason},
-      abort_reason = ${game.abortReason}, winner_seat = ${game.winnerSeat},
+      abort_reason = ${game.abortReason}, abort_seat = ${game.abortSeat}, winner_seat = ${game.winnerSeat},
       finished_at = COALESCE(finished_at, ${game.finishedAt}), turn = ${game.turn}, round = ${game.round},
       updated_at = ${game.finishedAt}
       WHERE id = ${game.gameId}`,

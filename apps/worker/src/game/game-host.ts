@@ -54,6 +54,15 @@ const modelErrorOf = (text: string): string => {
   return message.length > 200 ? `${message.slice(0, 200)}…` : message;
 };
 
+/**
+ * Whether a model error is the account's or provider's, not the model's: auth and credits
+ * (401/402/403), timeouts (408), rate limits (429) and provider failures (5xx). A game aborted
+ * on one is not held against the seat's model.
+ */
+export const isInfrastructureError = (message: string): boolean =>
+  /^(40[1238]|429|5\d\d)\b/.test(message) ||
+  /credit|in_flight|rate.?limit|overloaded|unavailable/i.test(message);
+
 export interface GameDbPort {
   readonly markRunning: (gameId: string, at: string) => Effect.Effect<void, UpstreamError>;
   readonly progress: (
@@ -366,10 +375,13 @@ export class GameHost<S, E extends EngineEvent, C> {
 
       if (modelErrors >= MAX_CONSECUTIVE_MODEL_ERRORS && this.status() === "running") {
         const label = this.seatOf(report.seat)?.label ?? report.seat;
+        const error = modelErrorOf(transcript.text);
 
-        this.abortGame(
-          `${label}'s model failed ${modelErrors} wakes in a row: ${modelErrorOf(transcript.text)}`,
-        );
+        if (!isInfrastructureError(error) && this.getMeta("abortReason") === undefined) {
+          this.setMeta("abortSeat", report.seat);
+        }
+
+        this.abortGame(`${label}'s model failed ${modelErrors} wakes in a row: ${error}`);
       }
 
       // Once the game stopped, its archive may already hold this seat's transcripts (the last
@@ -1173,6 +1185,10 @@ export class GameHost<S, E extends EngineEvent, C> {
               status,
               endReason: standings.endReason,
               abortReason: status === "aborted" ? (this.getMeta("abortReason") ?? null) : null,
+              abortSeat:
+                status === "aborted"
+                  ? (this.seatOf(this.getMeta("abortSeat") ?? "")?.seat ?? null)
+                  : null,
               winner: standings.winner,
               finishedAt,
               seats: game.seats.map((seat) => ({
@@ -1204,6 +1220,10 @@ export class GameHost<S, E extends EngineEvent, C> {
           status,
           endReason: standings.endReason ?? "aborted",
           abortReason: status === "aborted" ? (this.getMeta("abortReason") ?? null) : null,
+          abortSeat:
+            status === "aborted"
+              ? (this.seatOf(this.getMeta("abortSeat") ?? "")?.seat ?? null)
+              : null,
           winnerSeat: standings.winner,
           finishedAt,
           turn: pending.turn,
