@@ -109,6 +109,8 @@ const entryFor = (competitor: MockCompetitor, players: PlayersCount): Leaderboar
     ),
     invalidRate: competitor.invalidRate * between(`${key}:invalid`, 0.7, 1.3),
     timeoutRate: between(`${key}:timeout`, 0, 0.012),
+    modelAborts: 0,
+    abortRate: 0,
     costPerGameUsd: competitor.costPerGameUsd * (players / 4) * between(`${key}:cost`, 0.85, 1.15),
     avgWakeMs: competitor.avgWakeMs * between(`${key}:latency`, 0.9, 1.1),
   };

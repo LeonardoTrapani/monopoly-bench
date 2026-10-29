@@ -44,6 +44,8 @@ export const entry = (
   avgNetWorth: 3000,
   invalidRate: 0.01,
   timeoutRate: 0,
+  modelAborts: 0,
+  abortRate: 0,
   costPerGameUsd: 1,
   avgWakeMs: 5000,
 });

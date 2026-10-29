@@ -426,6 +426,14 @@ const COLUMNS: ReadonlyArray<
     className: "hidden lg:table-cell",
   },
   {
+    column: "AbortRate",
+    label: "Aborted %",
+    title:
+      "Games this model broke by failing wakes in a row, out of the games it played (credits, rate limits and outages do not count). Broken games are not rated.",
+    isNumeric: true,
+    className: "hidden lg:table-cell",
+  },
+  {
     column: "CostPerGame",
     label: "$/game",
     title: "Average model spend per game",
@@ -624,6 +632,7 @@ const leaderboardRow = (
       numericCell(h, decimal(entry.avgPlace, 2), ""),
       numericCell(h, moneyCompact(entry.avgNetWorth), "hidden md:table-cell"),
       numericCell(h, percent(entry.invalidRate), "hidden lg:table-cell"),
+      numericCell(h, percent(entry.abortRate), "hidden lg:table-cell"),
       numericCell(h, usd(entry.costPerGameUsd), "hidden md:table-cell"),
       numericCell(h, duration(entry.avgWakeMs), "hidden lg:table-cell"),
     ],

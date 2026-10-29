@@ -221,7 +221,7 @@ describe("model catalog", () => {
     const deepseek = catalog.models[2]?.estimatedSeatCostUsd ?? 0;
     const estimate = estimateRunCost(validForm, catalog.models);
 
-    expect(sonnet).toBeCloseTo(10.665, 3);
+    expect(sonnet).toBeCloseTo(4.99275, 5);
     expect(estimate.games).toBe(8);
     expect(estimate.perGameUsd).toBeCloseTo(sonnet + deepseek, 9);
     expect(estimate.totalUsd).toBeCloseTo((sonnet + deepseek) * 8, 9);
@@ -248,7 +248,7 @@ describe("model catalog", () => {
         cacheReadPerMTok: 0.3,
         cacheWritePerMTok: 3.75,
       }),
-    ).toBeCloseTo(10.665, 3);
+    ).toBeCloseTo(4.99275, 5);
   });
 });
 
